@@ -1,0 +1,5 @@
+{
+  "id": "denim", "order": 6, "name": "Denim / canvas", "material": "woven",
+  "rules": {"fill_spacing_mm": 0.4, "pull_comp_mm": 0.2},
+  "underlay": "light", "stabilizer": "Tearaway"
+}

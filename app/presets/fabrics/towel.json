@@ -1,0 +1,5 @@
+{
+  "id": "towel", "order": 5, "name": "Towel", "material": "terry / fleece",
+  "rules": {"fill_spacing_mm": 0.4, "pull_comp_mm": 0.3},
+  "underlay": "heavy", "stabilizer": "Tearaway + water-soluble topping"
+}

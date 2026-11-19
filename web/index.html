@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Embroidery Digitizer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>AI Embroidery Digitizer</h1>
+      <p>Turn a picture into a stitch file</p>
+    </div>
+    <ol class="steps" aria-label="Steps">
+      <li data-step="1" class="current">1 · Picture</li>
+      <li data-step="2">2 · Stitches</li>
+      <li data-step="3">3 · Download</li>
+    </ol>
+  </header>
+
+  <main>
+    <!-- ───────────── Screen 1: picture, size, garment ───────────── -->
+    <section id="screen1">
+      <div id="drop" class="drop" tabindex="0" role="button" aria-label="Choose a picture">
+        <img id="thumb" alt="" hidden>
+        <div id="dropText">
+          <strong>Drop a picture here</strong>
+          <span>or click to choose one · or paste with Ctrl+V</span>
+          <span class="hint">PNG, JPG or WEBP. Clean logos and clip art work best.</span>
+        </div>
+      </div>
+      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+      <p class="center"><button id="sampleBtn" class="link" type="button">No picture handy? Try our sample</button></p>
+      <p id="uploadError" class="notice red" hidden></p>
+
+      <h2>How big will this be sewn?</h2>
+      <div id="sizes" class="choices"></div>
+      <label id="customRow" class="custom" hidden>
+        Widest side: <input id="customIn" type="number" min="0.5" max="12" step="0.25" value="4"> inches
+      </label>
+
+      <h2>What's it going on?</h2>
+      <div id="fabrics" class="choices"></div>
+
+      <div class="actions">
+        <span></span>
+        <button id="next1" class="primary" type="button" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- ───────────── Screen 2: stitches ───────────── -->
+    <section id="screen2" hidden>
+      <div id="working" class="working">
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="workLabel">Getting started…</p>
+      </div>
+
+      <div id="failed" class="failed" hidden>
+        <p id="failText" class="notice red"></p>
+        <button id="failBack" class="primary" type="button">Go back</button>
+      </div>
+
+      <div id="ready" class="ready" hidden>
+        <div class="previewBox">
+          <canvas id="preview"></canvas>
+          <div class="swatches" id="garmentColors" aria-label="Garment color"></div>
+        </div>
+        <aside>
+          <div id="light" class="light"><span class="dot"></span><strong id="lightText"></strong></div>
+          <ul id="messages" class="messages"></ul>
+          <dl id="stats" class="stats"></dl>
+          <div class="control">
+            <span>Thread colors</span>
+            <div class="stepper">
+              <button id="fewer" type="button" aria-label="Fewer colors">−</button>
+              <output id="colorCount">6</output>
+              <button id="more" type="button" aria-label="More colors">+</button>
+            </div>
+          </div>
+          <p class="hint" id="colorHint">Fewer colors sew faster.</p>
+        </aside>
+      </div>
+
+      <div class="actions">
+        <button id="back2" type="button">Back</button>
+        <button id="next2" class="primary" type="button" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- ───────────── Screen 3: download ───────────── -->
+    <section id="screen3" hidden>
+      <h2>Which machine will sew this?</h2>
+      <div id="machines" class="choices"></div>
+
+      <div class="downloadBox">
+        <a id="downloadBtn" class="primary big" href="#" download>Download</a>
+        <p id="downloadNote" class="hint"></p>
+      </div>
+
+      <h2>Before you sew</h2>
+      <ul id="sewNotes" class="sewNotes"></ul>
+      <h2>Thread order</h2>
+      <ol id="threadOrder" class="threadOrder"></ol>
+
+      <div class="actions">
+        <button id="back3" type="button">Back</button>
+        <button id="again" type="button">Start another</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

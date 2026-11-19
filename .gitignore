@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Never commit settings (the OpenAI key will live in local settings, outside this folder)
+settings.json
+*.local.json
+# Scratch output
+out/
+debug/
+# The original brief PDF stays on this PC; BRIEF.md is the copy kept with the code
+*Build Brief.pdf

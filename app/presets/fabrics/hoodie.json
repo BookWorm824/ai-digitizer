@@ -1,0 +1,5 @@
+{
+  "id": "hoodie", "order": 2, "name": "Hoodie", "material": "knit",
+  "rules": {"fill_spacing_mm": 0.42, "pull_comp_mm": 0.35},
+  "underlay": "medium-heavy", "stabilizer": "Cutaway"
+}

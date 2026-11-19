@@ -1,0 +1,6 @@
+[
+  {"id": "left_chest", "name": "Left chest", "detail": "3.5 in", "w_in": 3.5, "h_in": 3.5},
+  {"id": "full_front", "name": "Full front", "detail": "10 in", "w_in": 10, "h_in": 10},
+  {"id": "hat_front", "name": "Hat front", "detail": "4 × 2.25 in", "w_in": 4, "h_in": 2.25},
+  {"id": "custom", "name": "Custom", "detail": "you choose"}
+]

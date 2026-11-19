@@ -1,0 +1,6 @@
+{
+  "id": "hat", "order": 4, "name": "Hat", "material": "structured cap",
+  "rules": {"fill_spacing_mm": 0.4, "pull_comp_mm": 0.3},
+  "underlay": "center run + edge run", "stabilizer": "Cap tearaway",
+  "max_height_mm": 57.0
+}
