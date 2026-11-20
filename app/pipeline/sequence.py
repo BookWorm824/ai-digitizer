@@ -21,6 +21,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import cv2
+import numpy as np
+from skimage.graph import route_through_array
+
 from shapely.geometry import LineString
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
@@ -28,6 +32,10 @@ from shapely.strtree import STRtree
 from .common import dist
 
 ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinary stitch
+ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
+ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
+ROUTE_CELL_MM = 0.3        # grid used to find it
+ROUTE_OPEN_MM = 1.0        # at most this much of it may lie on open ground (Ink/Stitch: 1 mm)
 KIND_ORDER = ("fill", "satin", "run")
 CAP_BAND_MM = 20.0
 
@@ -183,20 +191,83 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
 
     # A connecting thread is hidden only where stitching sewn AFTER it covers it. Thread laid
     # across stitching that is already sewn shows on top (a line across a finished satin).
-    order_shapes, order_of = [], {}
-    for n, (_color, raw_segments) in enumerate(raw_blocks):
+    # Thread may also hide under a later color only if that color is not lighter: dark
+    # thread under a light fill shows through.
+    order_shapes, order_colors, order_of = [], [], {}
+    for n, (color_n, raw_segments) in enumerate(raw_blocks):
         for j, (_sg, shape) in enumerate(raw_segments):
             order_of[(n, j)] = len(order_shapes)
             order_shapes.append(shape.buffer(0.3) if shape is not None else None)
+            order_colors.append(color_n)
     indexed = [(k, g) for k, g in enumerate(order_shapes) if g is not None]
     tree = STRtree([g for _, g in indexed]) if indexed else None
 
-    def hidden_by_later(line, k):
+    def lum(c):
+        if c < 0 or c >= len(palette):
+            return 128.0
+        r, g, b = palette[c]
+        return 0.299 * r + 0.587 * g + 0.114 * b
+
+    def covers(k, color, line):
         if tree is None:
-            return False
+            return []
         near = [indexed[i] for i in tree.query(line)]
-        later = [g for kk, g in near if kk >= k]
+        return [g for kk, g in near if kk >= k and (order_colors[kk] == color
+                                                    or lum(order_colors[kk]) <= lum(color) + 20)]
+
+    def hidden_by_later(line, k, color):
+        later = covers(k, color, line)
         return bool(later) and unary_union(later).contains(line)
+
+    def hidden_route(p, q, k, color):
+        """A travel path from p to q that stays under stitching sewn later (Ink/Stitch's
+        "underpath" idea, our own code): the cheapest route on a fine grid where covered
+        ground is cheap and open ground very dear. Accepted only if at most 1 mm of it is
+        uncovered and it isn't a long detour."""
+        straight = dist(p, q)
+        if straight > ROUTE_MAX_MM:
+            return None
+        box = LineString([p, q]).buffer(ROUTE_PAD_MM, cap_style=3).envelope
+        later = covers(k, color, box)
+        if not later:
+            return None
+        cover = unary_union(later).intersection(box)
+        if cover.is_empty:
+            return None
+        minx, miny, maxx, maxy = box.bounds
+        cell = ROUTE_CELL_MM
+        w, h = int(math.ceil((maxx - minx) / cell)) + 1, int(math.ceil((maxy - miny) / cell)) + 1
+        mask = np.zeros((h, w), np.uint8)
+        for poly in getattr(cover, "geoms", [cover]):
+            if poly.geom_type != "Polygon":
+                continue
+            ext = np.round((np.asarray(poly.exterior.coords)[:, :2] - [minx, miny]) / cell).astype(np.int32)
+            cv2.fillPoly(mask, [ext], 1)
+            for ring in poly.interiors:
+                hole = np.round((np.asarray(ring.coords)[:, :2] - [minx, miny]) / cell).astype(np.int32)
+                cv2.fillPoly(mask, [hole], 0)
+        cost = np.where(mask > 0, 1.0, 60.0)
+        a = (min(h - 1, max(0, int(round((p[1] - miny) / cell)))), min(w - 1, max(0, int(round((p[0] - minx) / cell)))))
+        b = (min(h - 1, max(0, int(round((q[1] - miny) / cell)))), min(w - 1, max(0, int(round((q[0] - minx) / cell)))))
+        try:
+            path, _total = route_through_array(cost, a, b, fully_connected=True, geometric=True)
+        except Exception:  # noqa: BLE001 - no route: trim instead
+            return None
+        path = np.asarray(path)
+        open_cells = int(sum(1 for r, c in path if mask[r, c] == 0))
+        if open_cells * cell > ROUTE_OPEN_MM:
+            return None
+        pts = [(minx + c * cell, miny + r * cell) for r, c in path]
+        line = LineString([p] + pts + [q]).simplify(cell)
+        if line.length > 2.5 * straight + 4.0:
+            return None
+        coords = list(line.coords)
+        out = []
+        for u, v in zip(coords, coords[1:]):            # travel stitches of about 2 mm
+            n = max(1, math.ceil(dist(u, v) / 2.0))
+            out.extend((u[0] + (v[0] - u[0]) * t / n, u[1] + (v[1] - u[1]) * t / n)
+                       for t in range(1, n + 1))
+        return out[:-1]
 
     for n, (color, raw_segments) in enumerate(raw_blocks):
         # join short hops where the thread is hidden, cut the rest
@@ -204,10 +275,15 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         for j, (sg, _shape) in enumerate(raw_segments):
             hop = dist(joined[-1][-1], sg[0]) if joined else None
             short_ok = hop is not None and hop <= ALWAYS_JOIN_MM and not isinstance(sg, _NewLetter)
+            k = order_of[(n, j)]
             ok = hop is not None and hop <= rules["trim_jump_mm"] and (
-                short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), order_of[(n, j)]))
+                short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), k, color))
             if ok:
                 joined[-1] = joined[-1] + list(sg)
+                continue
+            route = hidden_route(joined[-1][-1], sg[0], k, color) if hop is not None else None
+            if route is not None:
+                joined[-1] = joined[-1] + route + list(sg)
             else:
                 joined.append(list(sg))
         final = []

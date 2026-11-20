@@ -937,6 +937,9 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 continue
             if follow_plan(poly, color):
                 continue
+            if color == inside and typical_width(poly) < satin_min:
+                dropped += 1            # a thin gap between parts is open fabric, not thread
+                continue
             if poly.buffer(-satin_half).is_empty:          # narrow all over
                 sew_narrow(poly, color)
                 continue
@@ -963,6 +966,10 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             for piece in arms:
                 sew_narrow(piece, color)
 
+    bounds = vec.get("bounds") or unary_union(
+        [q for layer in vec["layers"] for q in layer["polys"]]).bounds
+    _match_mirrors(objects, bounds)
+
     if debug_dir is not None and objects:
         debug_picture(objects, debug_dir)
 
@@ -975,6 +982,42 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             "text_rows": len(by_row), "text_heights": kept, "text_left_out": left_out,
             "rows": row_info,
             "retyped": sum(1 for r in row_info if r["text"])}
+
+
+def _match_mirrors(objects: list, bounds) -> None:
+    """Matching parts on the two sides of a design (two roofs, two towers) are sewn the same
+    way: if mirror-image parts of one color came out one satin and one fill, the satin one
+    becomes a fill too. Mismatched halves are the first thing a customer notices."""
+    minx, _miny, maxx, _maxy = bounds
+    cx = (minx + maxx) / 2
+    span = max(maxx - minx, 1e-6)
+    cands = [k for k, o in enumerate(objects)
+             if o["kind"] in ("satin", "fill") and o.get("text_row") is None
+             and not o.get("texture") and o.get("seq") is None]
+
+    def geom(o):
+        return o["poly"] if o["kind"] == "fill" else o["outline"]
+    for i in cands:
+        a = objects[i]
+        if a["kind"] != "satin":
+            continue
+        ga = geom(a)
+        ax0, ay0, ax1, ay1 = ga.bounds
+        for j in cands:
+            b = objects[j]
+            if b["kind"] != "fill" or b["color"] != a["color"]:
+                continue
+            bx0, by0, bx1, by1 = geom(b).bounds
+            wa, ha, wb, hb = ax1 - ax0, ay1 - ay0, bx1 - bx0, by1 - by0
+            if not (abs(wa - wb) <= 0.2 * max(wa, wb) and abs(ha - hb) <= 0.2 * max(ha, hb)):
+                continue
+            if abs((ay0 + ay1) / 2 - (by0 + by1) / 2) > 0.25 * max(ha, hb):
+                continue
+            if abs(((ax0 + ax1) / 2 - cx) + ((bx0 + bx1) / 2 - cx)) > 0.04 * span:
+                continue
+            objects[i] = {"kind": "fill", "color": a["color"], "poly": ga.buffer(0),
+                          "area_mm2": float(ga.area)}
+            break
 
 
 def _foliage(shapes: dict, plan: dict | None) -> list:

@@ -98,23 +98,28 @@ def render_preview(plan: dict, px_per_mm: float = 10.0, fabric_rgb=(238, 236, 23
     off = max(1, int(round(0.12 * ppm)))
     for block in plan["blocks"]:
         rgb = np.array(block["rgb"], dtype=float)
+        shade = tuple(int(v) for v in (rgb * 0.45 * 0.7 + np.array(fabric_rgb) * 0.3)[::-1])
         for seg in block["segments"]:
             px = np.round(to_px(seg)).astype(np.int32)
-            for a, b in zip(px[:-1], px[1:]):
-                dx, dy = float(b[0] - a[0]), float(b[1] - a[1])
-                if dx * dx + dy * dy < (0.05 * ppm) ** 2:
-                    continue
-                lit = _thread_light(dx, dy)
-                pa, pb = (int(a[0]), int(a[1])), (int(b[0]), int(b[1]))
-                cv2.line(img, (pa[0] + off, pa[1] + off), (pb[0] + off, pb[1] + off),
-                         tuple(int(v) for v in (rgb * 0.45 * 0.65 + np.array(fabric_rgb) * 0.35)[::-1]),
-                         lw, cv2.LINE_AA)
-                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * 0.84 * lit)[::-1]),
-                         lw, cv2.LINE_AA)
-                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * lit)[::-1]),
-                         core, cv2.LINE_AA)
-                hi = rgb * lit * 1.1 + (255 - rgb * lit * 1.1) * 0.3
-                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in hi[::-1]), sheen, cv2.LINE_AA)
+            pairs = [((int(a[0]), int(a[1])), (int(b[0]), int(b[1])))
+                     for a, b in zip(px[:-1], px[1:])
+                     if (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2 >= (0.05 * ppm) ** 2]
+            # in runs of stitches: shadows first, so a shadow falls on the fabric and not on
+            # the thread beside it (which streaks a satin column)
+            for start in range(0, len(pairs), 60):
+                chunk = pairs[start:start + 60]
+                for pa, pb in chunk:
+                    cv2.line(img, (pa[0] + off, pa[1] + off), (pb[0] + off, pb[1] + off), shade,
+                             lw, cv2.LINE_AA)
+                for pa, pb in chunk:
+                    lit = _thread_light(pb[0] - pa[0], pb[1] - pa[1])
+                    cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * 0.84 * lit)[::-1]),
+                             lw, cv2.LINE_AA)
+                    cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * lit)[::-1]),
+                             core, cv2.LINE_AA)
+                    hi = rgb * lit * 1.1 + (255 - rgb * lit * 1.1) * 0.3
+                    cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in hi[::-1]), sheen,
+                             cv2.LINE_AA)
     h, w = img.shape[:2]
     return cv2.resize(img, (w // k, h // k), interpolation=cv2.INTER_AREA)
 

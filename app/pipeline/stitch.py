@@ -443,7 +443,16 @@ def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
     fewest jumps and travel runs (the Soft Sight patent), choosing only from angles that
     stay close to level (Erich Campbell: 15-20 deg off horizontal). `base` is preferred on
     ties, so neighbouring colors get different angles."""
-    if poly.area < 40.0:
+    if poly.area < 80.0:
+        # Small blocks (windows): rows along the longer side give clean, square edges;
+        # slanted rows leave a staircase along the sides of a small rectangle.
+        rect = poly.minimum_rotated_rectangle
+        if rect.area > 0 and poly.area / rect.area > 0.85:
+            c = list(rect.exterior.coords)
+            e1 = (c[1][0] - c[0][0], c[1][1] - c[0][1])
+            e2 = (c[2][0] - c[1][0], c[2][1] - c[1][1])
+            e = e1 if math.hypot(*e1) >= math.hypot(*e2) else e2
+            return math.degrees(math.atan2(e[1], e[0])) % 180.0
         return base
     best = None
     for k, angle in enumerate((base,) + tuple(a for a in FILL_ANGLES if a != base)):

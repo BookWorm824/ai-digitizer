@@ -700,16 +700,23 @@ function drawTo(n) {
     if (c.p >= points) { c.sg += 1; c.p = 0; continue; }
     const end = Math.min(points, c.p + Math.min(60, n - sim.drawn));
     const rgb = hexRgb(block.hex);
+    // shadows of this run of stitches first, so a stitch's shadow falls on the fabric, not
+    // on the thread beside it (which would streak a satin column)
+    const sh = 0.12 * s;
+    g.strokeStyle = rgbStr(rgb, 0.45); g.globalAlpha = 0.3; g.lineWidth = lw * 1.1;
+    g.beginPath();
+    for (let q = Math.max(1, c.p); q < end; q += 1) {
+      g.moveTo(seg[(q - 1) * 2] * s + sim.ox + sh, seg[(q - 1) * 2 + 1] * s + sim.oy + sh);
+      g.lineTo(seg[q * 2] * s + sim.ox + sh, seg[q * 2 + 1] * s + sim.oy + sh);
+    }
+    g.stroke();
+    g.globalAlpha = 1;
     for (let q = Math.max(1, c.p); q < end; q += 1) {
       const x0 = seg[(q - 1) * 2] * s + sim.ox; const y0 = seg[(q - 1) * 2 + 1] * s + sim.oy;
       const x1 = seg[q * 2] * s + sim.ox; const y1 = seg[q * 2 + 1] * s + sim.oy;
       const len = Math.hypot(x1 - x0, y1 - y0);
       if (len < 0.05 * s) continue;
       const lit = threadLight(Math.atan2(y1 - y0, x1 - x0));
-      const sh = 0.12 * s;                               // shadow falls down and to the right
-      g.beginPath(); g.moveTo(x0 + sh, y0 + sh); g.lineTo(x1 + sh, y1 + sh);
-      g.strokeStyle = rgbStr(rgb, 0.45); g.globalAlpha = 0.35; g.lineWidth = lw * 1.1; g.stroke();
-      g.globalAlpha = 1;
       g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
       g.strokeStyle = rgbStr(rgb, 0.84 * lit); g.lineWidth = lw; g.stroke();          // thread edge
       g.strokeStyle = rgbStr(rgb, lit); g.lineWidth = lw * 0.86; g.stroke();          // thread

@@ -426,9 +426,13 @@ def test_thread_may_cross_a_gap_only_if_a_later_color_covers_it():
     bare = sequence.run({"objects": [left, right]}, palette, RULES, [0])
     assert len(bare["blocks"][0]["segments"]) == 2 and bare["trims"] == 1   # open ground: trim
     patch = _sewn(1, [(9, -1), (13, -1), (13, 1), (9, 1)], box(9, -1, 13, 1))
-    covered = sequence.run({"objects": [left, right, patch]}, palette, RULES, [0, 1])
+    dark = [(90, 90, 90), (20, 20, 60)]          # gray thread, a darker navy patch over the gap
+    covered = sequence.run({"objects": [left, right, patch]}, dark, RULES, [0, 1])
     assert [b["color"] for b in covered["blocks"]] == [0, 1]
     assert len(covered["blocks"][0]["segments"]) == 1                       # hidden later: join
+    # black thread would show through a lighter red patch, so it is cut instead
+    light = sequence.run({"objects": [left, right, patch]}, palette, RULES, [0, 1])
+    assert len(light["blocks"][0]["segments"]) == 2
 
 
 def test_white_lettering_inside_a_design_is_sewn_not_left_as_holes(tmp_path):
