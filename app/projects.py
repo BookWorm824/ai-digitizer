@@ -35,7 +35,8 @@ def files_dir(pid: str) -> Path:
 
 
 def save(pid: str, name: str, cleanup_dir: Path, cleanup_result: dict, fit, fabric: str,
-         settings: dict, summary: dict, preview_png: Path | None) -> dict:
+         settings: dict, summary: dict, preview_png: Path | None,
+         project: dict | None = None) -> dict:
     """Create or update a project from a clean-up folder and the current choices."""
     d = _dir(pid)
     files = d / "files"
@@ -50,6 +51,7 @@ def save(pid: str, name: str, cleanup_dir: Path, cleanup_result: dict, fit, fabr
         "id": pid, "name": name,
         "saved": datetime.datetime.now().isoformat(timespec="seconds"),
         "fit": list(fit), "fabric": fabric, "settings": settings, "summary": summary,
+        "project": project,
         "cleanup": {k: v for k, v in cleanup_result.items() if k not in ("spend", "flash", "picked")},
     }
     tmp = d / "project.tmp"

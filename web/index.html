@@ -39,6 +39,21 @@
       <p class="center"><button id="sampleBtn" class="link" type="button">No picture handy? Try our sample</button></p>
       <p id="uploadError" class="notice red" hidden></p>
 
+      <h2>What are you making?</h2>
+      <div id="modes" class="choices"></div>
+
+      <div id="projectQs" hidden>
+        <h2>Which project?</h2>
+        <div id="projTypes" class="choices"></div>
+        <h2>What shape?</h2>
+        <div id="projShapes" class="choices"></div>
+        <h2>How big is the finished item?</h2>
+        <div id="projSizes" class="choices"></div>
+        <p class="hint">The machine builds the whole item in the hoop. You get step-by-step
+          instructions and cutting templates with the stitch file.</p>
+      </div>
+
+      <div id="garmentQs">
       <h2>How big will this be sewn?</h2>
       <div id="sizes" class="choices"></div>
       <label id="customRow" class="custom" hidden>
@@ -48,6 +63,7 @@
       <h2>What's it going on?</h2>
       <div id="fabrics" class="choices"></div>
       <p><button id="moreFabrics" class="link" type="button">More fabrics…</button></p>
+      </div>
 
       <div class="actions">
         <p id="aiLine" class="hint"></p>
@@ -183,6 +199,8 @@
         <a id="downloadBtn" class="primary big" href="#" download>Download</a>
         <p id="downloadNote" class="hint"></p>
         <div class="extras">
+          <a id="instructionsBtn" class="btn" href="#" download hidden>Step-by-step instructions (PDF)</a>
+          <a id="templatesBtn" class="btn" href="#" download hidden>Cutting templates (PDF)</a>
           <a id="worksheetBtn" class="btn" href="#" download>Worksheet (PDF)</a>
           <a id="mockupBtn" class="btn" href="#" download>Picture on the garment</a>
           <a id="zipBtn" class="btn" href="#" download>Everything in one zip</a>

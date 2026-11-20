@@ -1,0 +1,13 @@
+{
+  "id": "cotton",
+  "order": 23,
+  "name": "Cotton",
+  "material": "quilting cotton",
+  "project": true,
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.2,
+    "underlay_level": "medium"
+  },
+  "stabilizer": "Tearaway, hooped on its own"
+}

@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config, threads
-from . import (analyze, classify, clean, edits as edits_stage, export, intake, optimize, sequence,
-               stitch, validate, vectorize)
+from shapely.ops import unary_union
+
+from . import (analyze, classify, clean, edits as edits_stage, export, intake, ith, optimize,
+               sequence, stitch, validate, vectorize)
 from .common import PipelineError, hex_of
 
 __all__ = ["run_pipeline", "PipelineError"]
@@ -34,11 +36,15 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  fit_w_mm: float = 88.9, fit_h_mm: float = 88.9, fabric_id: str = "tshirt",
                  max_colors: int | None = None, overrides: dict | None = None,
                  density: int = 0, hints: dict | None = None, inside: str = "auto",
-                 edits: list | None = None,
+                 edits: list | None = None, project: dict | None = None,
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
     debug_dir = out_dir / "debug" if debug else None
+    project = ith.normalize(project)
+    if project:                 # an in-the-hoop project sets its own material and art size
+        fabric_id = ith.PROJECTS[project["type"]]["fabric"]
+        fit_w_mm, fit_h_mm = ith.decoration_fit(project)
     fabric = config.fabrics().get(fabric_id) or config.fabrics()["tshirt"]
     density = max(-2, min(2, int(density)))
     rules = config.rules_for(fabric["id"], overrides, density)
@@ -74,11 +80,18 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
             "Everything in this picture is too small to stitch at this size. Try a bigger size.")
     say("sequence")
     plan = sequence.run(stitched, palette, rules, classified["order"], debug_dir)
+    made = None
+    if project:                 # wrap the construction steps around the decoration
+        decoration = unary_union([o["shape"] for o in stitched["objects"] if o.get("shape") is not None])
+        plan, made = ith.build(plan, decoration, project, rules)
     say("validate")
     check = validate.run(plan, stitched, classified, fabric, config.hoops(), rules,
                          dict(hints or {}, density=density), debug_dir)
     say("export")
     exported = export.run(plan, out_dir, name, debug_dir)
+    dieline = {}
+    if made:                    # the placement line alone, as its own file, for cutting to shape
+        dieline = export.write_files(made["dieline_plan"], out_dir, f"{name} dieline")
 
     for fmt, info in exported["files"].items():
         if not info["ok"]:
@@ -96,7 +109,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
             "width_in": round(w / config.MM_PER_INCH, 2),
             "height_in": round(h / config.MM_PER_INCH, 2),
             "stitches": plan["stitch_count"],
-            "colors": len({b["color"] for b in plan["blocks"] if b["color"] != -1}),
+            "colors": len({b["color"] for b in plan["blocks"] if b["color"] >= 0}),
             "size_in": round(max(w, h) / config.MM_PER_INCH, 2),
             "satin_columns": sum(1 for o in stitched["objects"] if o["kind"] == "satin"),
             "trims": plan["trims"],
@@ -107,6 +120,17 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                   "hoop": check["hoop"]["name"] if check["hoop"] else None},
         "density": density,
         "inside": cleaned["inside"],
+        "project": None if not made else {
+            "type": made["type"], "name": made["name"], "shape": made["shape"],
+            "size_in": made["size_in"], "body_mm": made["body_mm"],
+            "materials": made["materials"], "notes": made["notes"],
+            "steps": ith.steps_of(plan),
+            "pieces": [{"name": p["name"],
+                        "ring": [round(v, 2) for xy in p["shape"].exterior.coords for v in xy]}
+                       for p in made["pieces"]],
+            "dieline": {fmt: {"ok": info["ok"], "path": info["path"]}
+                        for fmt, info in dieline.items()},
+        },
         "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"],
                    "notes": fabric.get("notes", [])},
         "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),

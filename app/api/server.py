@@ -21,7 +21,9 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, ai, chatgpt, cleanup, config, projects, settings, threads, worksheet
+from .. import (__version__, ai, chatgpt, cleanup, config, ith_docs, projects, settings, threads,
+                worksheet)
+from ..pipeline import ith
 from ..pipeline import PipelineError, run_pipeline
 
 MAX_UPLOAD = 40 * 1024 * 1024
@@ -96,7 +98,8 @@ def options():
         "version": __version__,
         "sizes": config.sizes(),
         "fabrics": [{"id": f["id"], "name": f["name"], "more": bool(f.get("more"))}
-                    for f in config.fabrics().values()],
+                    for f in config.fabrics().values() if not f.get("project")],
+        "projects": ith.options(),
         "machines": config.machines(),
         "thread_brands": threads.brands(),
         "max_colors": config.RULES["max_colors"],
@@ -150,12 +153,19 @@ def post_settings(body: dict = Body(...)):
 @app.post("/api/cleanup")
 async def create_cleanup(file: UploadFile = File(...), size: str = Form("left_chest"),
                          custom_in: float | None = Form(None), fabric: str = Form("tshirt"),
-                         use_ai: bool = Form(True)):
+                         use_ai: bool = Form(True), project: str = Form("")):
     data = await _read_upload(file)
     cid = uuid.uuid4().hex[:12]
+    try:
+        made = ith.normalize(json.loads(project)) if project else None
+    except ValueError:
+        made = None
+    if made:                    # an in-the-hoop project decides the material and the art size
+        fabric = ith.PROJECTS[made["type"]]["fabric"]
     job = {"status": "working", "label": "Getting started…", "name": _safe_name(file.filename),
-           "dir": config.data_dir() / "jobs" / cid, "fit": _fit_box(size, custom_in),
-           "fabric": fabric}
+           "dir": config.data_dir() / "jobs" / cid,
+           "fit": ith.decoration_fit(made) if made else _fit_box(size, custom_in),
+           "fabric": fabric, "project": made}
     with _lock:
         CLEANUPS[cid] = job
 
@@ -246,11 +256,15 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         if "result" not in src:
             raise HTTPException(409, "That picture is still being cleaned up.")
         name, fit, fabric = src["name"], src["fit"], src["fabric"]
+        made = dict(src["project"]) if src.get("project") else None
+        if made and size_in:    # for a project, the size control is the finished item's size
+            made["size_in"] = float(size_in)
+            size_in = None
         hints = cleanup.stitch_hints(src["dir"])
         get_data = lambda say: cleanup.picture_to_stitch(src["dir"], version, say)  # noqa: E731
     elif file is not None:
         data = await _read_upload(file)
-        name, fit, hints = _safe_name(file.filename), _fit_box(size, custom_in), {}
+        name, fit, hints, made = _safe_name(file.filename), _fit_box(size, custom_in), {}, None
         get_data = lambda say: data  # noqa: E731
     else:
         raise HTTPException(400, "Please choose a picture first.")
@@ -275,9 +289,11 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         result = run_pipeline(get_data(say), config.data_dir() / "jobs" / job_id, name,
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
                               max_colors=colors, density=density, hints=hints, inside=inside,
-                              edits=edit_list, progress=say)
+                              edits=edit_list, project=made, progress=say)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")
+        if result.get("project"):
+            job["dieline"] = {fmt: d.pop("path") for fmt, d in result["project"]["dieline"].items()}
         job["result"] = result
 
     _background(job, work)
@@ -361,8 +377,46 @@ def all_files(job_id: str, brand: str = threads.DEFAULT_BRAND, machine: str = ""
         z.writestr(f"{name} worksheet.pdf", _worksheet(job, brand, machine))
         z.write(job["paths"]["preview"], f"{name} preview.png")
         z.writestr(f"{name} mockup.png", worksheet.build_mockup(job["result"], color))
+        if job["result"].get("project"):
+            z.writestr(f"{name} instructions.pdf", ith_docs.instructions_pdf(job["result"]))
+            z.writestr(f"{name} cutting templates.pdf", ith_docs.templates_pdf(job["result"]))
+            for fmt, path in job.get("dieline", {}).items():
+                if job["result"]["project"]["dieline"][fmt]["ok"]:
+                    z.write(path, f"{name} dieline.{fmt}")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name} - all files.zip"'})
+
+
+def _project_job(job_id: str) -> dict:
+    job = _done_job(job_id)
+    if not job["result"].get("project"):
+        raise HTTPException(404, "That design isn't an in-the-hoop project.")
+    return job
+
+
+@app.get("/api/jobs/{job_id}/instructions.pdf")
+def instructions(job_id: str):
+    job = _project_job(job_id)
+    name = f"{job['result']['name']} instructions.pdf"
+    return Response(ith_docs.instructions_pdf(job["result"]), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/jobs/{job_id}/templates.pdf")
+def templates(job_id: str):
+    job = _project_job(job_id)
+    name = f"{job['result']['name']} cutting templates.pdf"
+    return Response(ith_docs.templates_pdf(job["result"]), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/jobs/{job_id}/dieline/{fmt}")
+def dieline_file(job_id: str, fmt: str):
+    job = _project_job(job_id)
+    path = job.get("dieline", {}).get(fmt)
+    if not path or not job["result"]["project"]["dieline"][fmt]["ok"]:
+        raise HTTPException(404, "That file isn't ready.")
+    return FileResponse(path, filename=Path(path).name, media_type="application/octet-stream")
 
 
 # ------------------------------------------------------------------------------ projects
@@ -387,7 +441,7 @@ def save_project(cleanup_id: str = Form(...), job_id: str = Form(...),
     summary = {"size_in": r["stats"]["size_in"], "stitches": r["stats"]["stitches"],
                "colors": r["stats"]["colors"], "status": r["check"]["status"]}
     return projects.save(pid, src["name"], src["dir"], src["result"], src["fit"], src["fabric"],
-                         chosen, summary, Path(job["paths"]["preview"]))
+                         chosen, summary, Path(job["paths"]["preview"]), src.get("project"))
 
 
 @app.get("/api/projects/{pid}/thumb.png")
@@ -413,9 +467,11 @@ def open_project(pid: str):
     with _lock:
         CLEANUPS[cid] = {"status": "done", "label": "", "name": meta["name"],
                          "dir": projects.files_dir(pid), "fit": tuple(meta["fit"]),
-                         "fabric": meta["fabric"], "result": result, "project_id": pid}
+                         "fabric": meta["fabric"], "result": result, "project_id": pid,
+                         "project": meta.get("project")}
     return {"cleanup_id": cid, "name": meta["name"], "result": result,
-            "settings": meta.get("settings", {}), "fabric": meta["fabric"]}
+            "settings": meta.get("settings", {}), "fabric": meta["fabric"],
+            "project": meta.get("project")}
 
 
 @app.delete("/api/projects/{pid}")

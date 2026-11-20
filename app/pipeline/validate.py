@@ -120,7 +120,7 @@ def run(plan: dict, stitched: dict, classified: dict, fabric: dict, hoops: list,
                 [size_fix("Make it bigger", need)] if need > widest_in + 0.1 else [])
 
     # ---- size of the job
-    design_colors = [b for b in plan["blocks"] if b["color"] != -1]
+    design_colors = {b["color"] for b in plan["blocks"] if b["color"] >= 0}
     if len(design_colors) > rules["max_colors"]:
         add("yellow", "This design uses a lot of thread colors. Fewer colors sew faster.")
     if plan["stitch_count"] > 60000:

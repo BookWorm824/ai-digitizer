@@ -1,0 +1,18 @@
+{
+  "id": "vinyl",
+  "order": 22,
+  "name": "Vinyl",
+  "material": "vinyl or faux leather",
+  "project": true,
+  "rules": {
+    "fill_spacing_mm": 0.55,
+    "pull_comp_mm": 0.2,
+    "underlay_level": "light",
+    "fill_stitch_mm": 4.0,
+    "min_detail_mm": 1.5
+  },
+  "stabilizer": "Tearaway, hooped on its own",
+  "notes": [
+    "Needle holes in vinyl are permanent, so the design is sewn a little more openly."
+  ]
+}

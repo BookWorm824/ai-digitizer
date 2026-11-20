@@ -1,0 +1,13 @@
+{
+  "id": "felt",
+  "order": 21,
+  "name": "Felt",
+  "material": "craft felt",
+  "project": true,
+  "rules": {
+    "fill_spacing_mm": 0.42,
+    "pull_comp_mm": 0.2,
+    "underlay_level": "medium"
+  },
+  "stabilizer": "Tearaway, hooped on its own"
+}

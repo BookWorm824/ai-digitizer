@@ -27,6 +27,8 @@ const state = {
   size: 'left_chest',
   sizeChosenByHand: false,
   fabric: 'tshirt',
+  mode: 'garment',          // 'garment' (decorate something) or 'project' (in-the-hoop item)
+  project: { type: 'feltie', shape: 'circle', size_in: 3 },
   cleanupId: null,          // the picture as cleaned up on screen 2
   cleanupFor: null,         // which picture/size/garment that clean-up was made for
   cleanup: null,
@@ -103,6 +105,28 @@ function choiceButtons(box, items, current, onPick) {
 }
 
 function renderChoices() {
+  choiceButtons($('#modes'), [
+    { id: 'garment', name: 'Decorate a garment', detail: 'Shirt, hat, towel…' },
+    { id: 'project', name: 'Make a project', detail: 'Patch, key fob, coaster…' },
+  ], state.mode, (id) => { state.mode = id; renderChoices(); });
+  $('#garmentQs').hidden = state.mode !== 'garment';
+  $('#projectQs').hidden = state.mode !== 'project';
+  const types = state.options.projects.types;
+  const type = types.find((t) => t.id === state.project.type) || types[0];
+  choiceButtons($('#projTypes'), types, type.id, (id) => {
+    const t = types.find((x) => x.id === id);
+    state.project = { ...state.project, type: id, size_in: t.default_in };
+    renderChoices();
+  });
+  choiceButtons($('#projShapes'), state.options.projects.shapes, state.project.shape, (id) => {
+    state.project = { ...state.project, shape: id };
+    renderChoices();
+  });
+  choiceButtons($('#projSizes'), type.sizes_in.map((v) => ({ id: String(v), name: `${v} in` })),
+    String(state.project.size_in), (id) => {
+      state.project = { ...state.project, size_in: Number(id) };
+      renderChoices();
+    });
   choiceButtons($('#sizes'), state.options.sizes, state.size, (id) => {
     state.size = id;
     state.sizeChosenByHand = true;
@@ -208,7 +232,8 @@ function showCleanupStage(which) {
 
 function cleanupKey() {
   return [state.fileStamp, state.size, state.size === 'custom' ? $('#customIn').value : '',
-    state.fabric, state.ai && state.ai.provider, state.skipAi].join('|');
+    state.fabric, state.ai && state.ai.provider, state.skipAi,
+    state.mode === 'project' ? JSON.stringify(state.project) : ''].join('|');
 }
 
 async function startCleanup() {
@@ -235,6 +260,7 @@ async function startCleanup() {
   form.append('custom_in', $('#customIn').value || '4');
   form.append('fabric', state.fabric);
   form.append('use_ai', state.skipAi ? 'false' : 'true');
+  if (state.mode === 'project') form.append('project', JSON.stringify(state.project));
   try {
     const { id } = await api('api/cleanup', { method: 'POST', body: form });
     const job = await waitFor('api/cleanup/' + id, token, $('#cLabel'));
@@ -485,9 +511,11 @@ function showResult() {
   $('#colorCount').textContent = String(s.colors);
   $('#fewer').disabled = s.colors <= 1;
   $('#more').disabled = noMore || s.colors >= state.maxColors;
-  $('#sizeOut').textContent = `${s.size_in} in`;
-  $('#smaller').disabled = s.size_in <= 0.75;
-  $('#bigger').disabled = s.size_in >= 12;
+  // for an in-the-hoop project the size is the finished item's, not the stitching's
+  const sizeNow = r.project ? r.project.size_in : s.size_in;
+  $('#sizeOut').textContent = `${sizeNow} in`;
+  $('#smaller').disabled = sizeNow <= (r.project ? 1.5 : 0.75);
+  $('#bigger').disabled = sizeNow >= (r.project ? 7 : 12);
   $('#density').value = String(r.density);
   $('#insideRow').hidden = !r.inside.present;
   $('#insideBox').checked = r.inside.sewn;
@@ -787,8 +815,9 @@ function setupScreen3() {
     startJob(true);
   };
   const quarter = (v) => Math.round(v * 4) / 4;
-  $('#smaller').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in - 0.25) }));
-  $('#bigger').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in + 0.25) }));
+  const sizeOf = () => (state.result.project ? state.result.project.size_in : state.result.stats.size_in);
+  $('#smaller').addEventListener('click', () => applyFix({ size_in: quarter(sizeOf() - 0.25) }));
+  $('#bigger').addEventListener('click', () => applyFix({ size_in: quarter(sizeOf() + 0.25) }));
   $('#density').addEventListener('change', (e) => applyFix({ density: Number(e.target.value) }));
   $('#insideBox').addEventListener('change', (e) => {
     state.inside = e.target.checked ? 'sew' : 'open';
@@ -864,6 +893,10 @@ function renderDownload() {
   $('#worksheetBtn').href = `api/jobs/${state.jobId}/worksheet.pdf?${q}`;
   $('#mockupBtn').href = `api/jobs/${state.jobId}/mockup.png?${q}&download=true`;
   $('#zipBtn').href = `api/jobs/${state.jobId}/all.zip?${q}`;
+  $('#instructionsBtn').hidden = !r.project;
+  $('#templatesBtn').hidden = !r.project;
+  $('#instructionsBtn').href = `api/jobs/${state.jobId}/instructions.pdf`;
+  $('#templatesBtn').href = `api/jobs/${state.jobId}/templates.pdf`;
   const btn = $('#downloadBtn');
   if (file && file.ok) {
     btn.href = `api/jobs/${state.jobId}/download/${fmt}`;
@@ -885,6 +918,10 @@ function renderDownload() {
     `Finished size: ${r.stats.width_in} × ${r.stats.height_in} inches.`,
   ];
   for (const n of r.fabric.notes || []) notes.push(n);
+  if (r.project) {
+    notes.unshift(`${r.project.name}: the machine stops after each step. Follow the instructions sheet.`);
+    for (const n of r.project.notes || []) notes.push(n);
+  }
   if (fmt === 'dst') notes.push('DST files do not store colors. Follow the thread order below.');
   const ul = $('#sewNotes');
   ul.innerHTML = '';
@@ -892,12 +929,14 @@ function renderDownload() {
 
   const ol = $('#threadOrder');
   ol.innerHTML = '';
+  let designColor = 0;                 // construction steps and the towel layer aren't numbered
   r.colors.forEach((c, i) => {
     const li = el('li');
     const chip = el('span', 'chip');
     chip.style.background = c.hex;
     const name = el('span');
-    name.append(c.label || `Color ${i + 1}`);
+    if (!c.label) designColor += 1;
+    name.append(c.label || `Color ${designColor}`);
     if (!c.label && threadName(c)) name.append(el('em', '', threadName(c)));
     li.append(chip, name, el('small', '', `${c.stitches.toLocaleString()} stitches`));
     ol.appendChild(li);
