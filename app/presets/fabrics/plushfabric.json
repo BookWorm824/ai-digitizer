@@ -1,0 +1,14 @@
+{
+  "id": "plushfabric",
+  "order": 24,
+  "name": "Plush fabric",
+  "material": "fleece, flannel or minky",
+  "project": true,
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.35,
+    "underlay_level": "heavy",
+    "min_detail_mm": 1.5
+  },
+  "stabilizer": "Tearaway, hooped on its own"
+}

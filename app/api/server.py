@@ -294,6 +294,8 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         job["paths"]["preview"] = result.pop("preview")
         if result.get("project"):
             job["dieline"] = {fmt: d.pop("path") for fmt, d in result["project"]["dieline"].items()}
+            job["extras"] = {key: {fmt: d.pop("path") for fmt, d in e["files"].items()}
+                             for key, e in result["project"]["extras"].items()}
         job["result"] = result
 
     _background(job, work)
@@ -383,6 +385,10 @@ def all_files(job_id: str, brand: str = threads.DEFAULT_BRAND, machine: str = ""
             for fmt, path in job.get("dieline", {}).items():
                 if job["result"]["project"]["dieline"][fmt]["ok"]:
                     z.write(path, f"{name} dieline.{fmt}")
+            for key, files in job.get("extras", {}).items():
+                for fmt, path in files.items():
+                    if job["result"]["project"]["extras"][key]["files"][fmt]["ok"]:
+                        z.write(path, f"{name} {key}.{fmt}")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name} - all files.zip"'})
 
@@ -415,6 +421,16 @@ def dieline_file(job_id: str, fmt: str):
     job = _project_job(job_id)
     path = job.get("dieline", {}).get(fmt)
     if not path or not job["result"]["project"]["dieline"][fmt]["ok"]:
+        raise HTTPException(404, "That file isn't ready.")
+    return FileResponse(path, filename=Path(path).name, media_type="application/octet-stream")
+
+
+@app.get("/api/jobs/{job_id}/extra/{key}/{fmt}")
+def extra_file(job_id: str, key: str, fmt: str):
+    """A part of a project that is sewn as its own file (a plush toy's ears)."""
+    job = _project_job(job_id)
+    path = job.get("extras", {}).get(key, {}).get(fmt)
+    if not path or not job["result"]["project"]["extras"][key]["files"][fmt]["ok"]:
         raise HTTPException(404, "That file isn't ready.")
     return FileResponse(path, filename=Path(path).name, media_type="application/octet-stream")
 

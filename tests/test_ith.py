@@ -19,7 +19,7 @@ from app.pipeline import ith, run_pipeline
 from app.pipeline.common import dist
 
 IMAGES = Path(__file__).parent / "images"
-TYPES = sorted(ith.PROJECTS)
+TYPES = ["coaster", "feltie", "keyfob", "ornament"]      # the first four project types
 
 
 def _art():
@@ -55,7 +55,8 @@ def test_unknown_or_missing_projects_are_not_projects():
 
 
 def test_project_types_come_in_the_briefs_order():
-    assert list(ith.PROJECTS) == ["feltie", "keyfob", "coaster", "ornament"]
+    assert list(ith.PROJECTS) == ["feltie", "keyfob", "coaster", "ornament", "plush", "zipbag",
+                                  "pillow", "pillowpanel", "lace"]
 
 
 # --------------------------------------------------------------------- how every file works
@@ -210,9 +211,9 @@ def _wait(client, url):
 
 def test_options_offer_projects_and_keep_their_materials_off_the_garment_list():
     o = TestClient(app).get("/api/options").json()
-    assert [t["id"] for t in o["projects"]["types"]] == ["feltie", "keyfob", "coaster", "ornament"]
-    assert {s["id"] for s in o["projects"]["shapes"]} == {"circle", "square", "follow"}
-    assert not {"felt", "vinyl", "cotton"} & {f["id"] for f in o["fabrics"]}
+    assert [t["id"] for t in o["projects"]["types"]] == list(ith.PROJECTS)
+    assert {s["id"] for s in o["projects"]["shapes"]} == {"circle", "square", "follow", "rect"}
+    assert not {"felt", "vinyl", "cotton", "plushfabric", "lace"} & {f["id"] for f in o["fabrics"]}
     assert all(config.fabrics()[i]["project"] for i in ("felt", "vinyl", "cotton"))
 
 
@@ -255,3 +256,125 @@ def test_garment_designs_have_no_project_pages():
     assert _wait(c, f"/api/jobs/{jid}")["result"]["project"] is None
     assert c.get(f"/api/jobs/{jid}/instructions.pdf").status_code == 404
     assert c.get(f"/api/jobs/{jid}/templates.pdf").status_code == 404
+
+
+# ------------------------------------------------- plush, zipper bag, pillows, lace
+
+MORE = ["plush", "zipbag", "pillow", "pillowpanel", "lace"]
+
+
+@pytest.fixture(scope="module")
+def more(tmp_path_factory):
+    return {kind: run_pipeline(_art(), tmp_path_factory.mktemp(kind), "logo", debug=False,
+                               project={"type": kind}) for kind in MORE}
+
+
+def _changes(path):
+    p = pyembroidery.read(path)
+    return sum(1 for s in p.stitches if (s[2] & 0xFF) in (pyembroidery.COLOR_CHANGE, pyembroidery.STOP))
+
+
+@pytest.mark.parametrize("kind", MORE)
+def test_more_projects_build_check_and_stop_at_every_step(more, kind):
+    r = more[kind]
+    steps = r["project"]["steps"]
+    assert r["check"]["status"] != "red" and r["check"]["hoop"] is not None
+    assert all(f["ok"] for f in r["files"].values())
+    assert len(r["blocks"]) == len(steps) and _changes(r["files"]["pes"]["path"]) == len(steps) - 1
+    assert steps[0]["before"] and all(s["thread"] for s in steps)
+    assert r["fabric"]["id"] == ith.PROJECTS[kind]["fabric"]
+    assert ith_docs.instructions_pdf(r)[:5] == b"%PDF-" and ith_docs.templates_pdf(r)[:5] == b"%PDF-"
+
+
+def test_only_allowed_shapes_are_used():
+    assert ith.normalize({"type": "zipbag", "shape": "circle"})["shape"] == "rect"
+    assert ith.normalize({"type": "pillow", "shape": "follow"})["shape"] == "square"
+    assert ith.normalize({"type": "plush"})["shape"] == "follow"
+    assert ith.normalize({"type": "pillowpanel", "size_in": 16})["size_in"] == 16
+
+
+def test_plush_has_a_roomy_gap_a_separate_ears_file_and_the_toy_safety_note(more):
+    r = more["plush"]
+    seam = _points(r["blocks"][-1])
+    assert dist(seam[1], seam[-2]) >= 45                              # room for stuffing
+    assert "ears" in r["project"]["steps"][-1]["before"]
+    ears = r["project"]["extras"]["ears"]
+    assert "first" in ears["title"] and all(f["ok"] for f in ears["files"].values())
+    assert _changes(ears["files"]["pes"]["path"]) == 1                # outlines, then seams
+    assert any("CPSC" in n for n in r["project"]["notes"])
+    assert any("Ear" in p["name"] for p in r["project"]["pieces"])
+    assert r["check"]["hoop"] == "5×7"
+
+
+def test_zipper_bag_steps_and_layout(more):
+    r = more["zipbag"]
+    titles = [s["title"] for s in r["project"]["steps"]]
+    assert titles[:4] == ["Zipper placement", "Zipper tackdown", "Top panel seam", "Bottom panel seam"]
+    assert titles[-1] == "Final seam"
+    w, h = r["project"]["body_mm"]
+    zc = -h / 2 + ith.ZIP_FROM_TOP_MM
+    tack = _points(r["blocks"][1])
+    assert {round(p[1] - zc) for p in tack} == {-6, 6}                # one run each side of the teeth
+    for block in r["blocks"][4:-1]:                                   # decoration: below the zipper
+        pts = _points(block)
+        assert min(p[1] for p in pts) > zc + 8 and max(p[1] for p in pts) < h / 2 - 6
+        assert max(abs(p[0]) for p in pts) < w / 2 - 6
+    last = r["project"]["steps"][-1]
+    assert "open the zipper halfway" in last["before"] and "through the open zipper" in last["after"]
+    assert "mesh" in r["fabric"]["stabilizer"].lower() and "not tearaway" in r["fabric"]["stabilizer"]
+    assert len(r["project"]["pieces"]) == 3
+    seam = _points(r["blocks"][-1])
+    assert dist(seam[1], seam[-2]) < 3                                # closed all the way round
+
+
+def test_small_pillow_is_closed_all_round_with_an_envelope_back(more):
+    r = more["pillow"]
+    seam = _points(r["blocks"][-1])
+    assert dist(seam[1], seam[-2]) < 3                                # no gap: turn via the overlap
+    assert "overlapping" in r["project"]["steps"][-1]["before"]
+    assert any("cut 2" in p["name"] for p in r["project"]["pieces"])
+    assert r["check"]["hoop"] in ("8×8", "6×10", "8×12")
+
+
+def test_pillow_panel_is_just_the_embroidered_front_with_a_sewing_sheet(more):
+    r = more["pillowpanel"]
+    titles = [s["title"] for s in r["project"]["steps"]]
+    assert titles[0] == "Basting box" and all(t.startswith("Decoration") for t in titles[1:])
+    assert r["stats"]["width_mm"] <= 201 and r["check"]["hoop"] is not None
+    assert any("sewing machine" in n for n in r["project"]["notes"])
+    front = r["project"]["pieces"][0]["ring"]
+    assert max(front[0::2]) - min(front[0::2]) == pytest.approx(17 * 25.4, abs=1)   # 16 in + seams
+
+
+def test_lace_base_is_a_dense_crossed_net_with_no_open_spots(more):
+    r = more["lace"]
+    titles = [s["title"] for s in r["project"]["steps"]]
+    assert titles[0] == "Lace base" and titles[-1] == "Satin frame"
+    assert "wash-away" in r["fabric"]["stabilizer"] and "bobbin" in r["project"]["steps"][0]["before"]
+    assert r["project"]["pieces"] == []                               # no fabric to cut
+    body = _body(r)
+    base = [list(zip(s[0::2], s[1::2])) for s in r["blocks"][0]["segments"]]
+    assert ith.lace_hole_mm(base, body) <= ith.LACE_MAX_HOLE_MM
+    assert sum(len(s) for s in base) > 2500                           # far denser than a fill underlay
+
+
+def test_lace_check_catches_a_base_with_a_hole():
+    body = Point(0, 0).buffer(20)
+    rows = [[(-20.0, y), (20.0, y)] for y in [v * 0.9 for v in range(-22, 23)] if abs(y) > 4]
+    assert ith.lace_hole_mm(rows, body) > ith.LACE_MAX_HOLE_MM        # an 8 mm band is missing
+    full = [[(-20.0, v * 0.9), (20.0, v * 0.9)] for v in range(-22, 23)]
+    assert ith.lace_hole_mm(full, body) <= ith.LACE_MAX_HOLE_MM
+
+
+def test_extra_files_download_and_join_the_zip():
+    c = TestClient(app)
+    cid = c.post("/api/cleanup", files={"file": ("Bear.png", _art(), "image/png")},
+                 data={"project": json.dumps({"type": "plush"})}).json()["id"]
+    _wait(c, f"/api/cleanup/{cid}")
+    jid = c.post("/api/jobs", data={"cleanup_id": cid, "version": "local"}).json()["id"]
+    r = _wait(c, f"/api/jobs/{jid}")["result"]
+    assert "path" not in json.dumps(r["project"])
+    assert c.get(f"/api/jobs/{jid}/extra/ears/pes").content[:4] == b"#PES"
+    assert c.get(f"/api/jobs/{jid}/extra/tail/pes").status_code == 404
+    names = set(zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{jid}/all.zip").content)).namelist())
+    assert {"Bear ears.pes", "Bear ears.dst", "Bear.pes", "Bear instructions.pdf"} <= names

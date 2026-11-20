@@ -89,9 +89,15 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                          dict(hints or {}, density=density), debug_dir)
     say("export")
     exported = export.run(plan, out_dir, name, debug_dir)
-    dieline = {}
+    dieline, extras = {}, {}
     if made:                    # the placement line alone, as its own file, for cutting to shape
         dieline = export.write_files(made["dieline_plan"], out_dir, f"{name} dieline")
+        for key, extra in made["extras"].items():     # parts sewn as their own file (plush ears)
+            extras[key] = {"title": extra["title"],
+                           "files": export.write_files(extra["plan"], out_dir, f"{name} {key}")}
+        for text in made["problems"]:
+            check["messages"].append({"level": "red", "text": text, "fixes": []})
+            check["status"] = "red"
 
     for fmt, info in exported["files"].items():
         if not info["ok"]:
@@ -130,8 +136,13 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                        for p in made["pieces"]],
             "dieline": {fmt: {"ok": info["ok"], "path": info["path"]}
                         for fmt, info in dieline.items()},
+            "extras": {key: {"title": e["title"],
+                             "files": {fmt: {"ok": info["ok"], "path": info["path"]}
+                                       for fmt, info in e["files"].items()}}
+                       for key, e in extras.items()},
         },
-        "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"],
+        "fabric": {"id": fabric["id"], "name": fabric["name"],
+                   "stabilizer": (made or {}).get("stabilizer") or fabric["stabilizer"],
                    "notes": fabric.get("notes", [])},
         "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),
                     "threads": None if b.get("label") else threads.match_all(b["rgb"]),

@@ -115,10 +115,14 @@ function renderChoices() {
   const type = types.find((t) => t.id === state.project.type) || types[0];
   choiceButtons($('#projTypes'), types, type.id, (id) => {
     const t = types.find((x) => x.id === id);
-    state.project = { ...state.project, type: id, size_in: t.default_in };
+    const shape = t.shapes.includes(state.project.shape) ? state.project.shape : t.shapes[0];
+    state.project = { type: id, shape, size_in: t.default_in };
     renderChoices();
   });
-  choiceButtons($('#projShapes'), state.options.projects.shapes, state.project.shape, (id) => {
+  if (!type.shapes.includes(state.project.shape)) state.project.shape = type.shapes[0];
+  $('#projShapeQ').hidden = type.shapes.length < 2;       // a zipper bag is always a rectangle
+  const shapes = state.options.projects.shapes.filter((sh) => type.shapes.includes(sh.id));
+  choiceButtons($('#projShapes'), shapes, state.project.shape, (id) => {
     state.project = { ...state.project, shape: id };
     renderChoices();
   });
@@ -515,7 +519,7 @@ function showResult() {
   const sizeNow = r.project ? r.project.size_in : s.size_in;
   $('#sizeOut').textContent = `${sizeNow} in`;
   $('#smaller').disabled = sizeNow <= (r.project ? 1.5 : 0.75);
-  $('#bigger').disabled = sizeNow >= (r.project ? 7 : 12);
+  $('#bigger').disabled = sizeNow >= (!r.project ? 12 : r.project.type === 'pillowpanel' ? 18 : 7);
   $('#density').value = String(r.density);
   $('#insideRow').hidden = !r.inside.present;
   $('#insideBox').checked = r.inside.sewn;
@@ -894,7 +898,17 @@ function renderDownload() {
   $('#mockupBtn').href = `api/jobs/${state.jobId}/mockup.png?${q}&download=true`;
   $('#zipBtn').href = `api/jobs/${state.jobId}/all.zip?${q}`;
   $('#instructionsBtn').hidden = !r.project;
-  $('#templatesBtn').hidden = !r.project;
+  $('#templatesBtn').hidden = !r.project || r.project.pieces.length === 0;
+  const extra = $('#extraLinks');
+  extra.innerHTML = '';
+  for (const [key, e] of Object.entries((r.project && r.project.extras) || {})) {
+    const fmt = (state.options.machines.find((m) => m.id === state.machine) || state.options.machines[0]).format;
+    if (!e.files[fmt] || !e.files[fmt].ok) continue;
+    const a = el('a', 'btn', `${e.title}: ${fmt.toUpperCase()} file`);
+    a.href = `api/jobs/${state.jobId}/extra/${key}/${fmt}`;
+    a.setAttribute('download', '');
+    extra.append(a);
+  }
   $('#instructionsBtn').href = `api/jobs/${state.jobId}/instructions.pdf`;
   $('#templatesBtn').href = `api/jobs/${state.jobId}/templates.pdf`;
   const btn = $('#downloadBtn');

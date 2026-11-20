@@ -1,0 +1,13 @@
+{
+  "id": "lace",
+  "order": 25,
+  "name": "Lace",
+  "material": "thread only, no fabric",
+  "project": true,
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.0,
+    "underlay_level": "light"
+  },
+  "stabilizer": "Two layers of water-soluble (wash-away) stabilizer"
+}
