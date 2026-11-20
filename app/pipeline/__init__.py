@@ -53,8 +53,12 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     rules = config.rules_for(fabric["id"], overrides, density)
     if max_colors:
         rules["max_colors"] = int(max_colors)
+    # Text too small for any stitch to make readable is left out by default (a professional
+    # drops or moves it, deep-dive rule 25 / 60); a negative value means "keep everything".
+    rules["drop_text_mm"] = rules.get("auto_drop_text_mm", 2.0)
     if (overrides or {}).get("drop_text_mm"):
-        rules["drop_text_mm"] = float(overrides["drop_text_mm"])
+        v = float(overrides["drop_text_mm"])
+        rules["drop_text_mm"] = 0.0 if v < 0 else v
     if inside in ("sew", "open"):       # the user's own choice for blank areas inside the design
         rules["sew_enclosed_background"] = inside == "sew"
 

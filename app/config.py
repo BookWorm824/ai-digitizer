@@ -32,13 +32,16 @@ RULES: dict = {
     "bean_stitch_mm": 2.0,        # bean stitch length (sources: about 2 mm)
     "text_run_mm": 4.0,           # lettering shorter than this is sewn as run/bean letters
     "min_text_mm": 6.0,           # smallest cap height that reads cleanly in satin (Hatch, Melco)
+    "auto_drop_text_mm": 2.0,     # text under this can't be read in thread: left out unless kept
     # Density and stitch lengths
     "fill_spacing_mm": 0.4,       # row spacing of a fill (fabric presets override)
     "fill_stitch_mm": 4.0,        # tatami stitch length (Wilcom 4; shorter ripples after washing)
     "run_stitch_mm": 2.5,
     "run_stitch_curve_mm": 1.5,   # on tight curves
     "max_stitch_mm": 7.0,         # longer stitches are split (Wilcom auto-split ~7 on wearables)
-    "min_stitch_mm": 0.5,         # shorter stitches are dropped
+    "min_stitch_mm": 0.3,         # shorter stitches are dropped (deep-dive rule 33: drop under
+                                  # 0.3 mm; 0.5 dropped the 0.45 mm turns at fill row ends,
+                                  # which slanted every row start and made small fills zigzag)
     # Pull compensation, PER SIDE, as in Wilcom's table: cotton/drill 0.20, T-shirt 0.35,
     # fleece 0.40, lettering 0.2-0.3. Fabric presets override. Satin uses the full value
     # (less on very narrow columns); fill rows use 60 % of it, since fill pulls in less.

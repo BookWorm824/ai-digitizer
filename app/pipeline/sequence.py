@@ -155,12 +155,17 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                 # letter's strokes as the font planned them (research rule 36)
                 lettered = sorted((o for o in mine if o.get("seq") is not None),
                                   key=lambda o: o["seq"])
-                last = None
+                last, last_punct = None, False
                 for o in lettered:
                     first, *rest = o["segments"]
                     letter = o["seq"][:2]
-                    segs.append((_NewLetter(first) if letter != last else first, o.get("shape")))
+                    # a short hop to the next letter may be sewn through, except next to
+                    # punctuation (a period joined to its letter reads as a comma)
+                    fresh = letter != last and (o.get("punct") or last_punct)
+                    segs.append((_NewLetter(first) if fresh else first, o.get("shape")))
                     segs.extend((sg, o.get("shape")) for sg in rest)
+                    if letter != last:
+                        last_punct = bool(o.get("punct"))
                     last = letter
                     pos = o["segments"][-1][-1]
                 part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)

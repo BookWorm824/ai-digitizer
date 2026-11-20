@@ -6,6 +6,7 @@ to write, and draw the preview picture.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2
@@ -77,26 +78,45 @@ def write_files(plan: dict, out_dir: Path, name: str, formats=FORMATS) -> dict:
     return results
 
 
+def _thread_light(dx: float, dy: float) -> float:
+    """How bright a thread looks by the way it runs (light from the upper left)."""
+    return 0.9 + 0.1 * math.cos(2 * math.atan2(dy, dx))   # same for both zig-zag slants
+
+
 def render_preview(plan: dict, px_per_mm: float = 10.0, fabric_rgb=(238, 236, 230)) -> np.ndarray:
-    """A simple thread-look picture (BGR) of the plan: every stitch drawn as a thread-thick
-    line with a lighter highlight down the middle."""
-    img, to_px = canvas_for(plan["bounds"], px_per_mm, pad_mm=4.0, color=fabric_rgb[::-1])
-    thick = max(1, int(round(0.38 * px_per_mm)))
+    """A thread-look picture (BGR) of the plan. Every stitch is drawn as its own piece of
+    thread, in sewing order: a soft shadow, the thread shaded by its direction (which is what
+    makes satin shine and fills look woven), and a thin highlight. Drawn at twice the size
+    and shrunk, for clean edges."""
+    k = 2
+    ppm = px_per_mm * k
+    img, to_px = canvas_for(plan["bounds"], ppm, pad_mm=4.0, color=fabric_rgb[::-1])
+    shadow_layer = img.copy()
+    lw = max(1, int(round(0.42 * ppm)))
+    core = max(1, int(round(0.37 * ppm)))
+    sheen = max(1, int(round(0.1 * ppm)))
+    off = max(1, int(round(0.12 * ppm)))
     for block in plan["blocks"]:
         rgb = np.array(block["rgb"], dtype=float)
-        dark = tuple(int(v) for v in (rgb * 0.72)[::-1])
-        base = tuple(int(v) for v in rgb[::-1])
-        light = tuple(int(v) for v in (rgb + (255 - rgb) * 0.35)[::-1])
         for seg in block["segments"]:
-            allpx = np.round(to_px(seg) * 8).astype(np.int32)    # 1/8 pixel precision
-            # draw in sewing order, a few stitches at a time, so later thread covers earlier
-            for i in range(0, len(allpx) - 1, 40):
-                px = allpx[i:i + 41]
-                cv2.polylines(img, [px], False, dark, thick + 1, cv2.LINE_AA, shift=3)
-                cv2.polylines(img, [px], False, base, thick, cv2.LINE_AA, shift=3)
-                if thick >= 3:
-                    cv2.polylines(img, [px], False, light, 1, cv2.LINE_AA, shift=3)
-    return img
+            px = np.round(to_px(seg)).astype(np.int32)
+            for a, b in zip(px[:-1], px[1:]):
+                dx, dy = float(b[0] - a[0]), float(b[1] - a[1])
+                if dx * dx + dy * dy < (0.05 * ppm) ** 2:
+                    continue
+                lit = _thread_light(dx, dy)
+                pa, pb = (int(a[0]), int(a[1])), (int(b[0]), int(b[1]))
+                cv2.line(img, (pa[0] + off, pa[1] + off), (pb[0] + off, pb[1] + off),
+                         tuple(int(v) for v in (rgb * 0.45 * 0.65 + np.array(fabric_rgb) * 0.35)[::-1]),
+                         lw, cv2.LINE_AA)
+                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * 0.84 * lit)[::-1]),
+                         lw, cv2.LINE_AA)
+                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * lit)[::-1]),
+                         core, cv2.LINE_AA)
+                hi = rgb * lit * 1.1 + (255 - rgb * lit * 1.1) * 0.3
+                cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in hi[::-1]), sheen, cv2.LINE_AA)
+    h, w = img.shape[:2]
+    return cv2.resize(img, (w // k, h // k), interpolation=cv2.INTER_AREA)
 
 
 def run(plan: dict, out_dir: Path, name: str, debug_dir: Path | None = None) -> dict:

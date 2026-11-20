@@ -112,6 +112,14 @@ def run(plan: dict, stitched: dict, classified: dict, fabric: dict, hoops: list,
     # Text size, measured on the lettering the classifier found (research rule 5): under
     # text_run_mm it can only be sewn as thin run-stitch letters; under min_text_mm it sews
     # but reads poorly. Offer to enlarge, or for the tiniest text, to leave it out.
+    left_out = classified.get("text_left_out") or []
+    if left_out:
+        auto = rules.get("drop_text_mm", 0.0) <= rules.get("auto_drop_text_mm", 2.0) + 1e-6
+        add("yellow",
+            f"Some text is only about {max(left_out):.1f} mm tall, too small for any thread to make "
+            "readable, so it was left out." if auto else "The tiny text is left out, as you chose.",
+            [{"label": "Keep it anyway", "set": {"drop_text_mm": -1}},
+             size_fix("Make it bigger", round(min(12.0, (w if w > h else h) / 25.4 * 2.6 / max(left_out)), 1))])
     measured = classified.get("text_heights") or []
     if measured:
         text_mm = measured[0]

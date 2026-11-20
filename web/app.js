@@ -685,28 +685,62 @@ function drawTo(n) {
   const s = sim.s;
   // Thread is about 0.4 mm but flattens and spreads when sewn, closing the gaps between
   // rows, so it is drawn a touch wider: otherwise the underlay shows through as a grid.
-  const lw = 0.47 * s;
+  // Every stitch is drawn as its own piece of thread, the way it lies on the fabric: a soft
+  // shadow under it, the thread itself shaded by which way it runs (thread catches the light
+  // differently by direction, which is what makes satin shine and fills look woven), and a
+  // thin highlight down its middle.
+  const lw = 0.42 * s;
   const c = sim.cursor;
+  g.lineCap = 'round';
   while (sim.drawn < n && c.b < r.blocks.length) {
     const block = r.blocks[c.b];
     const seg = block.segments[c.sg];
     if (!seg) { c.b += 1; c.sg = 0; c.p = 0; continue; }
     const points = seg.length / 2;
     if (c.p >= points) { c.sg += 1; c.p = 0; continue; }
-    const end = Math.min(points, c.p + Math.min(40, n - sim.drawn));
-    const from = Math.max(0, c.p - 1);                   // join on to the stitch before
-    g.beginPath();
-    g.moveTo(seg[from * 2] * s + sim.ox, seg[from * 2 + 1] * s + sim.oy);
-    for (let q = from + 1; q < end; q += 1) g.lineTo(seg[q * 2] * s + sim.ox, seg[q * 2 + 1] * s + sim.oy);
-    g.strokeStyle = shade(block.hex, -0.16); g.lineWidth = lw * 1.1; g.stroke();   // soft edge
-    g.strokeStyle = block.hex; g.lineWidth = lw * 0.9; g.stroke();                 // the thread
-    g.globalAlpha = 0.5;
-    g.strokeStyle = shade(block.hex, 0.22); g.lineWidth = lw * 0.28; g.stroke();   // a little sheen
-    g.globalAlpha = 1;
+    const end = Math.min(points, c.p + Math.min(60, n - sim.drawn));
+    const rgb = hexRgb(block.hex);
+    for (let q = Math.max(1, c.p); q < end; q += 1) {
+      const x0 = seg[(q - 1) * 2] * s + sim.ox; const y0 = seg[(q - 1) * 2 + 1] * s + sim.oy;
+      const x1 = seg[q * 2] * s + sim.ox; const y1 = seg[q * 2 + 1] * s + sim.oy;
+      const len = Math.hypot(x1 - x0, y1 - y0);
+      if (len < 0.05 * s) continue;
+      const lit = threadLight(Math.atan2(y1 - y0, x1 - x0));
+      const sh = 0.12 * s;                               // shadow falls down and to the right
+      g.beginPath(); g.moveTo(x0 + sh, y0 + sh); g.lineTo(x1 + sh, y1 + sh);
+      g.strokeStyle = rgbStr(rgb, 0.45); g.globalAlpha = 0.35; g.lineWidth = lw * 1.1; g.stroke();
+      g.globalAlpha = 1;
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
+      g.strokeStyle = rgbStr(rgb, 0.84 * lit); g.lineWidth = lw; g.stroke();          // thread edge
+      g.strokeStyle = rgbStr(rgb, lit); g.lineWidth = lw * 0.86; g.stroke();          // thread
+      g.globalAlpha = 0.4;
+      g.strokeStyle = rgbStr(rgb, 1.25 * lit, 0.25); g.lineWidth = lw * 0.22; g.stroke(); // sheen
+      g.globalAlpha = 1;
+    }
     sim.drawn += end - c.p;
     sim.last = [seg[(end - 1) * 2], seg[(end - 1) * 2 + 1]];
     c.p = end;
   }
+}
+
+function hexRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return [v >> 16 & 255, v >> 8 & 255, v & 255];
+}
+
+// How bright a thread looks by the way it runs (smooth, so the two slants of a satin
+// zig-zag look alike and the column reads as one smooth band).
+function threadLight(angle) {
+  return 0.9 + 0.1 * Math.cos(2 * angle);      // the same for a stitch and its zig-zag partner
+}
+
+// rgb scaled by `k`, then blended `toWhite` of the way to white (for highlights).
+function rgbStr(rgb, k, toWhite = 0) {
+  const ch = rgb.map((v) => {
+    const x = Math.min(255, v * k + (k > 1 ? 18 * (k - 1) * 4 : 0));
+    return Math.round(x + (255 - x) * toWhite);
+  });
+  return `rgb(${ch[0]},${ch[1]},${ch[2]})`;
 }
 
 // Put the big picture on the screen. `fine` shrinks it in halves for the smoothest result;

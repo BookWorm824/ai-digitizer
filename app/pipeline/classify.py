@@ -970,8 +970,10 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     by_row = {r: k for r, k in by_row.items() if r in {i["row"] for i in row_info}}
     heights = sorted({round(rows[k[0]]["height"], 2) for k in by_row.values()})
     kept = [h for h in heights if h >= rules.get("drop_text_mm", 0.0)]
+    left_out = [h for h in heights if h < rules.get("drop_text_mm", 0.0)]
     return {"objects": objects, "dropped_details": dropped, "order": order,
-            "text_rows": len(by_row), "text_heights": kept, "rows": row_info,
+            "text_rows": len(by_row), "text_heights": kept, "text_left_out": left_out,
+            "rows": row_info,
             "retyped": sum(1 for r in row_info if r["text"])}
 
 

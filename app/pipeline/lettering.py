@@ -35,7 +35,7 @@ import re
 
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import substring, unary_union
 
 from .common import polygons_of
 
@@ -69,7 +69,7 @@ FONT = {
     "D": "M 0 0 L 0 1 | M 0 1 L .24 1 A .24 .5 .36 .5 90 -90 L 0 0",
     "E": "M 0 0 L 0 1 | M 0 1 L .52 1 | M 0 .52 L .44 .52 | M 0 0 L .54 0",
     "F": "M 0 0 L 0 1 | M 0 1 L .52 1 | M 0 .5 L .44 .5",
-    "G": "A .37 .5 .37 .5 48 352 | M .4 .43 L .736 .43",
+    "G": "A .37 .5 .37 .5 48 360 | M .4 .44 L .70 .44",
     "H": "M 0 0 L 0 1 | M .6 0 L .6 1 | M 0 .52 L .6 .52",
     "I": "M 0 0 L 0 1",
     "J": "M .42 1 L .42 .25 A .21 .25 .21 .25 0 -160",
@@ -637,6 +637,8 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                                    MIN_SATIN_MM / SATIN_MAX_RATIO, SATIN_TEXT_MM)
         if run:
             pl = _as_line(pl)
+            out.extend(_run_letter(pl, style, color, group, li, row))
+            continue
         strokes = letter_strokes(pl, style)
         wide = pl.w > rules.get("satin_max_mm", 7.0)
         cols = []
@@ -710,6 +712,68 @@ def _as_line(pl: Placement) -> Placement:
     cx = pl.bx + pl.outer_width() / 2
     q.bx = cx - q.outer_width() / 2
     return q
+
+
+def _letter_tours(lines: list, tol: float = 0.08) -> list:
+    """A letter's strokes as one continuous thread (or as few as possible): strokes are split
+    where another stroke meets them, joined into a network, and walked out and back along
+    every stroke (linenet.tours), so a running-stitch letter needs no trims inside it."""
+    from . import linenet                    # noqa: PLC0415 - avoid a circular import
+    ends = [np.asarray(l[0]) for l in lines] + [np.asarray(l[-1]) for l in lines]
+    pieces = []
+    for l in lines:
+        ls = LineString(l)
+        cuts = sorted({round(ls.project(Point(e)), 6) for e in ends
+                       if ls.distance(Point(e)) < tol and 1e-3 < ls.project(Point(e)) < ls.length - 1e-3})
+        marks = [0.0] + cuts + [ls.length]
+        for a, b in zip(marks, marks[1:]):
+            if b - a > 1e-3:
+                pieces.append(np.asarray(substring(ls, a, b).coords))
+    nodes, edges = [], []
+
+    def node(p):
+        for k, q in enumerate(nodes):
+            if math.dist(p, q) < tol:
+                return k
+        nodes.append(tuple(p))
+        return len(nodes) - 1
+    for pc in pieces:
+        a, b = node(pc[0]), node(pc[-1])
+        pc = pc.copy()
+        pc[0], pc[-1] = nodes[a], nodes[b]
+        edges.append({"a": a, "b": b, "pts": pc})
+    if not edges:
+        return []
+    return linenet.tours(np.asarray(nodes, float), edges)
+
+
+def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> list:
+    """One running-stitch letter: its strokes as one continuous out-and-back thread (two even
+    passes; from 4.5 mm up the way back is a bean, for a bolder line), plus round knots for
+    dots."""
+    strokes = letter_strokes(pl, style)
+    lines = [np.asarray(st["pts"], float) for st in strokes
+             if not st["dot"] and LineString(st["pts"]).length >= 0.3]
+    out = []
+    for k, route in enumerate(_letter_tours(lines)):
+        o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)), "route": route,
+             "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
+             "stitch_mm": 1.25 if pl.H < 4.0 else 1.6, "seq": (group, li, k),
+             "punct": not pl.ch.isalnum()}
+        if row is not None:
+            o["text_row"] = row
+        out.append(o)
+    for k, st in enumerate(s for s in strokes if s["dot"]):
+        (x0, y0), (x1, y1) = st["pts"]
+        my, a = (y0 + y1) / 2, 0.25
+        # a small crossed knot, which sews as a round dot (a short dash looks like a comma)
+        knot = LineString([(x0 - a, my - a), (x0 + a, my + a), (x0 + a, my - a), (x0 - a, my + a)])
+        o = {"kind": "run", "color": color, "line": knot, "width_mm": 0.8, "bean": True,
+             "stitch_mm": 1.25, "seq": (group, li, 100 + k), "punct": not pl.ch.isalnum()}
+        if row is not None:
+            o["text_row"] = row
+        out.append(o)
+    return out
 
 
 def text_style(H: float) -> dict:

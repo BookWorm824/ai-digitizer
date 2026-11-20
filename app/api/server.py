@@ -296,7 +296,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                               max_colors=colors, density=density, hints=hints, inside=inside,
                               edits=edit_list, project=made, progress=say, letters=letters,
                               ai_assist=assist,
-                              overrides={"drop_text_mm": drop_text_mm} if drop_text_mm > 0 else None)
+                              overrides={"drop_text_mm": drop_text_mm} if drop_text_mm else None)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")
         if result.get("project"):
