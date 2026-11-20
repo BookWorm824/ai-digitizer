@@ -14,9 +14,11 @@
     </div>
     <ol class="steps" aria-label="Steps">
       <li data-step="1" class="current">1 · Picture</li>
-      <li data-step="2">2 · Stitches</li>
-      <li data-step="3">3 · Download</li>
+      <li data-step="2">2 · Clean up</li>
+      <li data-step="3">3 · Stitches</li>
+      <li data-step="4">4 · Download</li>
     </ol>
+    <button id="settingsBtn" type="button" class="quiet">Settings</button>
   </header>
 
   <main>
@@ -27,7 +29,7 @@
         <div id="dropText">
           <strong>Drop a picture here</strong>
           <span>or click to choose one · or paste with Ctrl+V</span>
-          <span class="hint">PNG, JPG or WEBP. Clean logos and clip art work best.</span>
+          <span class="hint">PNG, JPG or WEBP</span>
         </div>
       </div>
       <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
@@ -44,13 +46,49 @@
       <div id="fabrics" class="choices"></div>
 
       <div class="actions">
-        <span></span>
+        <p id="aiLine" class="hint"></p>
         <button id="next1" class="primary" type="button" disabled>Next</button>
       </div>
     </section>
 
-    <!-- ───────────── Screen 2: stitches ───────────── -->
+    <!-- ───────────── Screen 2: clean up ───────────── -->
     <section id="screen2" hidden>
+      <div id="cWorking" class="working">
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="cLabel">Getting started…</p>
+      </div>
+
+      <div id="cFailed" class="failed" hidden>
+        <p id="cFailText" class="notice red"></p>
+        <button id="cFailBack" class="primary" type="button">Go back</button>
+      </div>
+
+      <div id="cReady" hidden>
+        <h2 class="top">Pick the version you like best</h2>
+        <p id="cNote" class="notice blue" hidden></p>
+        <p id="cTip" class="notice blue" hidden></p>
+        <p id="cFlash" class="notice red" hidden></p>
+        <div id="versions" class="versions"></div>
+
+        <div id="tweakBox" class="tweak" hidden>
+          <label for="tweakText">Want something changed? Say it in plain words.</label>
+          <div class="tweakRow">
+            <input id="tweakText" type="text" maxlength="300"
+                   placeholder="thicker outline · drop the background · only 4 colors">
+            <button id="tweakBtn" type="button">Make this change</button>
+          </div>
+        </div>
+        <p id="cCost" class="hint"></p>
+      </div>
+
+      <div class="actions">
+        <button id="back2" type="button">Back</button>
+        <button id="next2" class="primary" type="button" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- ───────────── Screen 3: stitches ───────────── -->
+    <section id="screen3" hidden>
       <div id="working" class="working">
         <div class="spinner" aria-hidden="true"></div>
         <p id="workLabel">Getting started…</p>
@@ -78,19 +116,19 @@
               <button id="more" type="button" aria-label="More colors">+</button>
             </div>
           </div>
-          <p class="hint" id="colorHint">Fewer colors sew faster.</p>
+          <p class="hint">Fewer colors sew faster.</p>
         </aside>
       </div>
 
       <div class="actions">
-        <button id="back2" type="button">Back</button>
-        <button id="next2" class="primary" type="button" disabled>Next</button>
+        <button id="back3" type="button">Back</button>
+        <button id="next3" class="primary" type="button" disabled>Next</button>
       </div>
     </section>
 
-    <!-- ───────────── Screen 3: download ───────────── -->
-    <section id="screen3" hidden>
-      <h2>Which machine will sew this?</h2>
+    <!-- ───────────── Screen 4: download ───────────── -->
+    <section id="screen4" hidden>
+      <h2 class="top">Which machine will sew this?</h2>
       <div id="machines" class="choices"></div>
 
       <div class="downloadBox">
@@ -104,11 +142,38 @@
       <ol id="threadOrder" class="threadOrder"></ol>
 
       <div class="actions">
-        <button id="back3" type="button">Back</button>
+        <button id="back4" type="button">Back</button>
         <button id="again" type="button">Start another</button>
       </div>
     </section>
   </main>
+
+  <!-- ───────────── Settings ───────────── -->
+  <dialog id="settings">
+    <form method="dialog" class="settingsForm">
+      <h2 class="top">Settings</h2>
+
+      <h3>AI clean-up (ChatGPT)</h3>
+      <p class="hint">The AI redraws your picture as clean embroidery art. It uses an OpenAI key, which
+        is pay-as-you-go and separate from a ChatGPT subscription. You get one at
+        platform.openai.com. The key is saved only on this PC.</p>
+      <p id="keyStatus" class="keyStatus"></p>
+      <label for="keyInput">OpenAI key</label>
+      <input id="keyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+
+      <label for="capInput">Most to spend on AI in one day (US dollars)</label>
+      <input id="capInput" type="number" min="0" max="100" step="0.5">
+      <p id="spendLine" class="hint"></p>
+      <p id="settingsError" class="notice red" hidden></p>
+
+      <div class="actions">
+        <button id="removeKey" type="button">Remove key</button>
+        <span class="grow"></span>
+        <button id="closeSettings" type="button">Close</button>
+        <button id="saveSettings" class="primary" type="button">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

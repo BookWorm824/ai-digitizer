@@ -1,7 +1,8 @@
 """The image -> stitch file pipeline. One module per stage (see BRIEF.md, "Under the hood").
 
-Phase 1 runs the local stages only: intake, clean, vectorize, classify, stitch, sequence,
-validate, export. The two AI stages (analyze, optimize) arrive in Phase 2.
+run_pipeline() runs the local stages: intake, clean, vectorize, classify, stitch, sequence,
+validate, export. The two AI stages (analyze, optimize) run before it, from app/cleanup.py,
+and hand it the picture the user chose.
 """
 
 from __future__ import annotations
@@ -10,7 +11,8 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config
-from . import classify, clean, export, intake, sequence, stitch, validate, vectorize
+from . import (analyze, classify, clean, export, intake, optimize, sequence, stitch, validate,
+               vectorize)
 from .common import PipelineError, hex_of
 
 __all__ = ["run_pipeline", "PipelineError"]

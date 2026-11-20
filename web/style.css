@@ -28,7 +28,7 @@ header {
 .brand h1 { margin: 0; font-size: 22px; }
 .brand p { margin: 0; color: var(--muted); font-size: 15px; }
 
-.steps { display: flex; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.steps { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
 .steps li {
   padding: 6px 14px; border-radius: 999px; background: var(--bg); color: var(--muted);
   font-size: 15px; white-space: nowrap;
@@ -117,3 +117,49 @@ aside { background: var(--card); border: 1px solid var(--line); border-radius: 1
 .threadOrder li { display: flex; align-items: center; gap: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
 .threadOrder .chip { width: 28px; height: 28px; border-radius: 6px; border: 1px solid rgba(0,0,0,.25); flex: none; }
 .threadOrder small { color: var(--muted); margin-left: auto; }
+
+/* ───────────── Phase 2: settings button, clean-up screen, settings dialog ───────────── */
+h2.top { margin-top: 0; }
+h3 { font-size: 17px; margin: 18px 0 6px; }
+button.quiet { min-height: 40px; padding: 8px 16px; color: var(--muted); }
+.actions { align-items: center; }
+.actions .hint { margin: 0; flex: 1; }
+.actions .grow { flex: 1; }
+.notice.blue { background: #eef3ff; color: #1d3a8f; border: 1px solid #c5d4f7; }
+.notice button.link { color: inherit; font-weight: 600; }
+
+.versions { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 300px)); gap: 14px; }
+.version {
+  background: var(--card); border: 2px solid var(--line); border-radius: 14px; padding: 10px;
+  cursor: pointer; display: flex; flex-direction: column; gap: 8px; text-align: left;
+}
+.version:hover { border-color: #9db4ee; }
+.version.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.version h3 { margin: 0; display: flex; align-items: center; gap: 8px; }
+.version .tick {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); flex: none;
+}
+.version.on .tick { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px #fff; }
+.version p { margin: 0; color: var(--muted); font-size: 15px; }
+.ba { position: relative; aspect-ratio: 1; background: #fff; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ba img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.ba .tag { position: absolute; top: 6px; font-size: 12px; background: rgba(31,36,48,.72); color: #fff; padding: 1px 7px; border-radius: 999px; }
+.ba .tag.l { left: 6px; } .ba .tag.r { right: 6px; }
+.ba input[type=range] { position: absolute; left: 0; right: 0; bottom: 4px; width: 100%; margin: 0; cursor: ew-resize; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; min-height: 22px; }
+.chips span { width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgba(0,0,0,.25); }
+.version .warn { background: #fff6dd; border: 1px solid #ecd28a; color: #6b4e00; border-radius: 8px; padding: 8px; font-size: 14.5px; }
+.version .warn button { min-height: 36px; padding: 6px 12px; margin-top: 6px; }
+
+.tweak { margin-top: 22px; }
+.tweak label { display: block; font-weight: 600; margin-bottom: 6px; }
+.tweakRow { display: flex; gap: 10px; flex-wrap: wrap; }
+.tweakRow input { flex: 1 1 280px; font: inherit; padding: 12px; border: 1px solid var(--line); border-radius: 10px; min-height: 48px; }
+
+dialog { border: 0; border-radius: 16px; padding: 0; width: min(560px, 94vw); box-shadow: 0 20px 60px rgba(0,0,0,.3); color: var(--ink); }
+dialog::backdrop { background: rgba(20,24,34,.45); }
+.settingsForm { padding: 24px; }
+.settingsForm label { display: block; font-weight: 600; margin: 14px 0 6px; }
+.settingsForm input { font: inherit; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.keyStatus { font-weight: 600; margin: 10px 0 0; }
+.keyStatus.ok { color: var(--green); }

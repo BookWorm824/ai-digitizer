@@ -1,0 +1,32 @@
+{
+  "_about": "Defaults for the ChatGPT (OpenAI API) stage. Anything here can be overridden in the local settings file. Model names and prices were checked against OpenAI's docs on the date below; check again before relying on them.",
+  "checked": "2026-11-19",
+  "models": {
+    "analyze": "gpt-6.1-terra",
+    "redraw_preview": "gpt-image-2.5-flare",
+    "redraw_final": "gpt-image-2.5-sunburst"
+  },
+  "quality": {"preview": "low", "final": "high"},
+  "final_polish": true,
+  "daily_spend_cap_usd": 2.0,
+  "prices_per_million_tokens": {
+    "image_models": {
+      "default": {"text_in": 5.0, "image_in": 8.0, "image_out": 30.0}
+    },
+    "text_models": {
+      "default": {"in": 2.0, "out": 10.0},
+      "gpt-6.2-astra": {"in": 8.0, "out": 40.0},
+      "gpt-6.2-sol": {"in": 2.0, "out": 10.0},
+      "gpt-6.1-terra": {"in": 1.0, "out": 5.0},
+      "gpt-6-luna": {"in": 0.1, "out": 0.5}
+    }
+  },
+  "_estimates": "Rough starting guesses in US dollars per call, used only until the app has made real calls; after that it uses the average of what OpenAI actually charged.",
+  "estimate_usd": {
+    "analyze": 0.005,
+    "read_text": 0.003,
+    "redraw_low": 0.02,
+    "redraw_medium": 0.05,
+    "redraw_high": 0.15
+  }
+}

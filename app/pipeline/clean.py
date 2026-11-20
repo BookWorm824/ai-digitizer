@@ -225,13 +225,23 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         src = core if core.sum() >= 50 else m
         palette.append(tuple(int(v) for v in np.median(rgb_w[src], axis=0)))
 
+    result = {"labels": out, "palette": palette, "ppm": float(ppm),
+              "has_background": bool(alpha_w is not None or bg_id is not None)}
     if debug_dir is not None:
-        dbg = np.full((H, W, 3), 255, np.uint8)
-        yy, xx = np.indices((H, W))
-        dbg[((yy // 12 + xx // 12) % 2 == 0)] = 235      # checkerboard = not sewn
-        for i, col in enumerate(palette):
-            dbg[out == i] = col[::-1]
-        save_debug(debug_dir, "04_clean.png", dbg)
+        dbg = render(result, checker=True)
+        save_debug(debug_dir, "04_clean.png", dbg[:, :, ::-1])
+    return result
 
-    return {"labels": out, "palette": palette, "ppm": float(ppm),
-            "has_background": bool(alpha_w is not None or bg_id is not None)}
+
+def render(cleaned: dict, checker: bool = False) -> np.ndarray:
+    """The cleaned-up art as an RGB picture: flat colors on white (or on a checkerboard,
+    to show which parts will not be sewn)."""
+    labels, palette = cleaned["labels"], cleaned["palette"]
+    H, W = labels.shape
+    img = np.full((H, W, 3), 255, np.uint8)
+    if checker:
+        yy, xx = np.indices((H, W))
+        img[((yy // 12 + xx // 12) % 2 == 0)] = 235
+    for i, col in enumerate(palette):
+        img[labels == i] = col
+    return img

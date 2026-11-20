@@ -32,6 +32,7 @@ RULES: dict = {
     "pull_comp_mm": 0.2,          # shapes are grown by this much (fabric presets override)
     "trim_jump_mm": 3.0,          # jumps longer than this get a trim
     "max_colors": 6,
+    "min_text_mm": 5.0,           # smallest capital-letter height that stays readable
     "hoop_margin_mm": 5.0,
     "underlay": True,             # light fill underlay at 90 degrees to the top stitches
     "underlay_spacing_mm": 3.0,
