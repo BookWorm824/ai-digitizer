@@ -37,7 +37,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 from skimage.morphology import skeletonize
 
-from . import geometry, lettering, linenet
+from . import aiplan, geometry, lettering, linenet
 from .common import canvas_for, dist, polygons_of, save_debug
 
 SKEL_PPM = 12.0          # resolution used to find centre lines
@@ -620,7 +620,7 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
 
 
 def run(vec: dict, rules: dict, debug_dir: Path | None = None,
-        text: list[str] | None = None, letters: str = "auto") -> dict:
+        text: list[str] | None = None, letters: str = "auto", plan: dict | None = None) -> dict:
     """Choose how every shape is sewn. `text` is the words known to be in the picture (read
     by ChatGPT); `letters` is auto | retype | trace (see the lettering rows below)."""
     satin_min = rules["satin_min_mm"]
@@ -630,6 +630,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
 
     order = sewing_order(vec["layers"], rules["satin_max_mm"])
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
+    textures = _foliage(shapes, plan)
     rows = text_rows(shapes, order, rules)
     inside = vec.get("inside_color")
     if inside is not None and rows:
@@ -689,7 +690,17 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                     objects.append({"kind": "run", "color": color, "line": line, "width_mm": 0.6,
                                     "bean": True, "stitch_mm": 1.8, "edge": True})
 
-    def add_network(piece, color):
+    def add_texture(poly, color, angle=None, ink=1.0):
+        """Foliage: one soft, textured mass (stitch.stitch_texture). Small gaps inside it
+        are filled; only real openings stay open."""
+        mass = Polygon(poly.exterior, [h for h in poly.interiors if Polygon(h).area > 3.0])
+        if mass.area < min_area:
+            return
+        objects.append({"kind": "fill", "texture": True, "color": color, "poly": mass,
+                        "area_mm2": float(mass.area), "angle": 70.0 if angle is None else angle,
+                        "ink": float(ink)})
+
+    def add_network(piece, color, bold=None):
         """Line art: the centre lines as one clean network, straightened and lined up, sewn
         as one continuous thread with two passes on every line (linenet.py). Returns False
         if there was nothing worth sewing."""
@@ -709,7 +720,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         # Running-stitch weight by drawn width (research: running_stitch.md): thin lines get
         # two even passes; lines from 0.8 mm (or any line on pile, where runs sink) get four:
         # out once and back as a bean, which reads as a bold line without a skinny satin.
-        bold = width >= rules["line_bold_mm"] or rules.get("knockdown", False)
+        if bold is None:
+            bold = width >= rules["line_bold_mm"] or rules.get("knockdown", False)
         for route in routes:
             line = LineString(np.vstack(route))
             objects.append({"kind": "run", "color": color, "line": line, "route": route,
@@ -798,6 +810,37 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 add_edge(g, c)
             done.add((c, i))
 
+    def follow_plan(poly, color) -> bool:
+        """Sew a shape the way ChatGPT planned it. Returns False to use the app's own rules
+        (no plan for it, "auto", or a choice that doesn't suit the shape)."""
+        nonlocal dropped
+        dv = aiplan.directive_for(plan, color, poly)
+        if not dv or dv["stitch"] == "auto":
+            return False
+        st, angle = dv["stitch"], (dv["angle"] if dv["angle"] >= 0 else None)
+        if st == "omit":
+            dropped += 1
+            return True
+        if st in ("run", "bean"):
+            return bool(add_network(poly, color, bold=(st == "bean")) or add_lines(poly, color))
+        if st == "texture":
+            add_texture(poly, color, angle)
+            return True
+        if st == "satin":
+            cols = try_satin(poly, rules) if use_satin else None
+            if cols:
+                add_satin(cols, color)
+                return True
+            return False
+        if st == "fill" and poly.area >= min_area:
+            # Guardrail: a web of thin strokes is line art however dark it looks; filling
+            # across 1 mm walls is the mess professionals avoid (deep-dive rule 18).
+            if typical_width(poly) < satin_min:
+                return bool(add_network(poly, color) or add_lines(poly, color))
+            add_fill(poly, color, angle)
+            return True
+        return False
+
     # ---- lettering, one row at a time
     by_row = {}
     for key, info in rows.items():
@@ -851,6 +894,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         for group in by_line.values():
             if len(group) > 1:
                 lettering.unify([f["placements"] for f in group])
+    for color, mass, ink in textures:
+        add_texture(mass, color, ink=ink)
     for info in row_info:
         row, height = info["row"], info["height"]
         keys = row_keys[row]
@@ -876,6 +921,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             continue
         for i, poly in enumerate(shapes[color]):
             if (color, i) in done:
+                continue
+            if follow_plan(poly, color):
                 continue
             if poly.buffer(-satin_half).is_empty:          # narrow all over
                 sew_narrow(poly, color)
@@ -911,6 +958,54 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     return {"objects": objects, "dropped_details": dropped, "order": order,
             "text_rows": len(by_row), "text_heights": kept, "rows": row_info,
             "retyped": sum(1 for r in row_info if r["text"])}
+
+
+def _foliage(shapes: dict, plan: dict | None) -> list:
+    """Cut foliage out of the shapes: inside every foliage box from the plan, ink that is
+    dense (a tree drawn as a web or scribble of lines, or a dark blob) becomes one mass to be
+    sewn as a soft texture; lines that merely pass through stay lines. Returns
+    [(color, mass)]."""
+    if not plan or not plan.get("foliage"):
+        return []
+    out = []
+    # In each box only the main ink colors are foliage (a roof corner that pokes into the
+    # box stays what it is).
+    ink_in = {}
+    for k, bx in enumerate(plan["foliage"]):
+        for color in shapes:
+            ink_in[(k, color)] = sum(p.intersection(bx).area for p in shapes[color] if p.intersects(bx))
+    for color in list(shapes):
+        masses = []
+        for k, bx in enumerate(plan["foliage"]):
+            total = sum(v for (kk, _c), v in ink_in.items() if kk == k)
+            if total <= 0 or ink_in[(k, color)] < 0.25 * total:
+                continue
+            inside = [p.intersection(bx) for p in shapes[color] if p.intersects(bx)]
+            region = unary_union(inside)
+            kept = []
+            for r in (1.0, 2.0, 3.0):       # close small gaps; wider only for sparse drawing
+                closed = region.buffer(r, quad_segs=4).buffer(-r, quad_segs=4).intersection(bx)
+                found = []
+                for m in polygons_of(closed):
+                    ink = region.intersection(m).area / max(m.area, 1e-9)
+                    if m.area >= 15.0 and ink >= 0.2:   # not a line merely passing through
+                        found.append((m, ink))
+                if not found:
+                    continue
+                # the tree is the main mass; small separate bits (a window beside it) stay lines
+                biggest = max(m.area for m, _ in found)
+                kept = [(m, ink) for m, ink in found if m.area >= 0.3 * biggest]
+                covered = sum(region.intersection(m).area for m, _ in kept)
+                if covered >= 0.85 * region.area and len(kept) <= 3:
+                    break                       # a few cohesive masses: that's the tree
+            for m, ink in kept:
+                masses.append(m)
+                out.append((color, m, ink))
+        if masses:
+            cut = unary_union(masses).buffer(0.2)
+            shapes[color] = [q for p in shapes[color] for q in polygons_of(p.difference(cut))
+                             if q.area > 0.05]
+    return out
 
 
 def debug_picture(objects: list, debug_dir: Path) -> None:

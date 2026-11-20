@@ -97,6 +97,7 @@ const state = {
   inside: 'auto',           // blank areas inside the design: auto | sew | open
   dropTextMm: 0,            // text shorter than this is left out (a one-click fix)
   letters: 'auto',          // words: auto | retype (embroidery lettering) | trace
+  aiAssist: 'auto',         // ChatGPT plans the stitches: auto | on | off
   placing: null,            // words waiting for a click to say where they go
   moreFabrics: false,
   jobId: null,
@@ -516,6 +517,7 @@ async function startJob(force) {
   form.append('inside', state.inside);
   form.append('drop_text_mm', String(state.dropTextMm));
   form.append('letters', state.letters);
+  form.append('ai_assist', state.skipAi ? 'off' : state.aiAssist);
   form.append('edits', JSON.stringify(state.edits));
   if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
@@ -591,6 +593,7 @@ function showResult() {
   $('#insideBox').checked = r.inside.sewn;
   $('#undoBtn').hidden = state.edits.length === 0;
   renderLettering(r);
+  renderAiHelp(r);
   renderThreadChips();
   draw();
   renderDownload();
@@ -843,6 +846,22 @@ function addEdit(edit) {
   startJob(true);
 }
 
+// "Let ChatGPT plan the stitches", and what ChatGPT said about the design.
+function renderAiHelp(r) {
+  const info = r.ai_digitize || { used: false, notes: [] };
+  const can = !!(state.ai && state.ai.provider) && !state.skipAi;
+  $('#aiAssistRow').hidden = !can;
+  $('#aiAssistBox').checked = state.aiAssist !== 'off' && (info.used || state.aiAssist === 'on' || state.aiAssist === 'auto');
+  const ul = $('#aiNotes');
+  ul.innerHTML = '';
+  const notes = info.used ? [...info.notes] : [];
+  if (info.problem && state.aiAssist !== 'off' && can) {
+    notes.push("ChatGPT couldn't help this time, so the app planned the stitches on its own.");
+  }
+  for (const n of notes) ul.append(el('li', '', n));
+  ul.hidden = notes.length === 0;
+}
+
 // The "Words" choice, shown when the design has lettering in it.
 function renderLettering(r) {
   const info = r.lettering || { rows: 0, retyped: 0 };
@@ -869,8 +888,10 @@ function stopPlacing() {
 function renderThreadChips() {
   const box = $('#threadChips');
   box.innerHTML = '';
+  const seen = new Set();                 // hats sew a color more than once: list it once
   for (const c of state.result.colors) {
-    if (c.label) continue;                               // the towel's flattening layer
+    if (c.label || seen.has(c.hex)) continue;            // (and skip the towel's flattening layer)
+    seen.add(c.hex);
     const b = el('button');
     b.type = 'button';
     const chip = el('span', 'chip');
@@ -978,6 +999,7 @@ function setupScreen3() {
   $('#retypeGo').addEventListener('click', retype);
   $('#retypeText').addEventListener('keydown', (e) => { if (e.key === 'Enter') retype(); });
   $('#lettersMode').addEventListener('change', (e) => { state.letters = e.target.value; startJob(true); });
+  $('#aiAssistBox').addEventListener('change', (e) => { state.aiAssist = e.target.checked ? 'on' : 'off'; startJob(true); });
   $('#addWordsBtn').addEventListener('click', () => {
     const panel = $('#wordsPanel');
     panel.hidden = !panel.hidden;
@@ -1127,6 +1149,7 @@ async function saveProject() {
   form.append('settings_json', JSON.stringify({
     version: state.version, colors: state.colors, sizeIn: state.sizeIn, density: state.density,
     inside: state.inside, edits: state.edits, garment: state.garment, letters: state.letters,
+    aiAssist: state.aiAssist,
   }));
   try { await api('api/projects', { method: 'POST', body: form }); } catch { /* saving is a bonus */ }
 }
@@ -1184,6 +1207,7 @@ async function openProject(id) {
     state.inside = st.inside || 'auto';
     state.edits = Array.isArray(st.edits) ? st.edits : [];
     state.letters = st.letters || 'auto';
+    state.aiAssist = st.aiAssist || 'auto';
     state.garment = st.garment || state.garment;
     state.result = null;
     state.stitchedFor = null;

@@ -10,11 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from .. import config, threads
+from .. import ai, config, threads
 from shapely.ops import unary_union
 
-from . import (analyze, classify, clean, edits as edits_stage, export, intake, ith, lettering,
-               optimize, sequence, stitch, validate, vectorize)
+from . import (aiplan, analyze, classify, clean, edits as edits_stage, export, intake, ith,
+               lettering, optimize, sequence, stitch, validate, vectorize)
 from .common import PipelineError, hex_of
 
 __all__ = ["run_pipeline", "PipelineError"]
@@ -25,6 +25,8 @@ LABELS = {
     "clean": "Cleaning up your art…",
     "vectorize": "Tracing the shapes…",
     "classify": "Choosing stitch types…",
+    "plan": "ChatGPT is planning the stitches…",
+    "review": "ChatGPT is checking the stitches…",
     "stitch": "Laying stitches…",
     "sequence": "Planning the sewing order…",
     "validate": "Checking the design…",
@@ -37,7 +39,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  max_colors: int | None = None, overrides: dict | None = None,
                  density: int = 0, hints: dict | None = None, inside: str = "auto",
                  edits: list | None = None, project: dict | None = None,
-                 letters: str = "auto",
+                 letters: str = "auto", ai_assist: bool = False, ai_review: bool = True,
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
@@ -84,21 +86,66 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         classified = classify.run(vec, rules, debug_dir, text=(hints or {}).get("text"),
                                   letters=letters)
         rules["max_colors"] -= 1
-    palette = list(cleaned["palette"])
+
+    # ChatGPT as the digitizer's judgment (aiplan.py): what each part is and how to sew it.
+    ai_info = {"used": False, "reviewed": False, "notes": [], "problem": None}
+    size_text = f"{max(fit_w_mm, fit_h_mm) / config.MM_PER_INCH:.1f} inches across"
+    fabric_text = f"a {fabric['name'].lower()}"
+    ai_plan = None
+    if ai_assist:
+        say("plan")
+        try:
+            ai_plan = aiplan.make_plan(vec, size_text, fabric_text)
+        except ai.AIUnavailable as e:
+            ai_info["problem"] = e.reason
+        if ai_plan:
+            if debug_dir is not None:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                (debug_dir / "06a_ai_plan_map.png").write_bytes(ai_plan["png"])
+            ai_info["used"] = True
+            ai_info["notes"] = list(ai_plan["notes"])
+            say("classify")
+            classified = classify.run(vec, rules, debug_dir, text=(hints or {}).get("text"),
+                                      letters=letters, plan=ai_plan)
+
+    palette0 = list(cleaned["palette"])
     bx0, by0, bx1, by1 = vec["bounds"]
     ref = max(bx1 - bx0, by1 - by0)         # what click positions are fractions of
-    applied = 0
-    if edits:                               # the user's own changes, made on the preview
-        classified, palette, applied = edits_stage.apply(classified, palette, edits, ref, rules)
-        if not classified["objects"]:
-            raise PipelineError("There is nothing left to stitch. Undo your last change.")
-    say("stitch")
-    stitched = stitch.run(classified, rules, debug_dir)
-    if not stitched["objects"]:
-        raise PipelineError(
-            "Everything in this picture is too small to stitch at this size. Try a bigger size.")
-    say("sequence")
-    plan = sequence.run(stitched, palette, rules, classified["order"], debug_dir)
+
+    def build(classified):
+        palette, applied = list(palette0), 0
+        if edits:                           # the user's own changes, made on the preview
+            classified, palette, applied = edits_stage.apply(classified, palette, edits, ref, rules)
+            if not classified["objects"]:
+                raise PipelineError("There is nothing left to stitch. Undo your last change.")
+        say("stitch")
+        stitched = stitch.run(classified, rules, debug_dir)
+        if not stitched["objects"]:
+            raise PipelineError(
+                "Everything in this picture is too small to stitch at this size. Try a bigger size.")
+        say("sequence")
+        plan = sequence.run(stitched, palette, rules, classified["order"], debug_dir)
+        return classified, palette, applied, stitched, plan
+
+    classified, palette, applied, stitched, plan = build(classified)
+    if ai_plan and ai_review:
+        # one round of review: ChatGPT looks at the stitches and names what would sew badly
+        say("review")
+        try:
+            verdict = aiplan.review(ai_plan, vec, plan, size_text, fabric_text)
+        except ai.AIUnavailable as e:
+            verdict = None
+            ai_info["problem"] = ai_info["problem"] or e.reason
+        if verdict:
+            if debug_dir is not None:
+                (debug_dir / "08a_ai_review_map.png").write_bytes(verdict["png"])
+            ai_info["reviewed"] = True
+            ai_info["notes"] = (verdict["notes"] or ai_info["notes"])[:3]
+            if verdict["changed"]:
+                say("classify")
+                again = classify.run(vec, rules, debug_dir, text=(hints or {}).get("text"),
+                                     letters=letters, plan=ai_plan)
+                classified, palette, applied, stitched, plan = build(again)
     made = None
     if project:                 # wrap the construction steps around the decoration
         decoration = unary_union([o["shape"] for o in stitched["objects"] if o.get("shape") is not None])
@@ -168,6 +215,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                     "threads": None if b.get("label") else threads.match_all(b["rgb"]),
                     "stitches": sum(len(s) for s in b["segments"])} for b in plan["blocks"]],
         "areas": edits_stage.areas(classified["objects"], palette, classified.get("rows")),
+        "ai_digitize": ai_info,
         "lettering": {"rows": len(classified.get("rows", [])),
                       "retyped": sum(1 for r in classified.get("rows", []) if r.get("text")),
                       "mode": letters,

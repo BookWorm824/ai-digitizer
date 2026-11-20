@@ -371,6 +371,11 @@ def analyze(png: bytes) -> dict:
     return _vision_json("analyze", png, ANALYZE_PROMPT, "embroidery_analysis", ANALYSIS_SCHEMA)
 
 
+def ask_json(kind: str, png: bytes, prompt: str, schema_name: str, schema: dict) -> dict:
+    """Any picture question with a structured answer (used by the digitizing planner)."""
+    return _vision_json(kind, png, prompt, schema_name, schema)
+
+
 def read_text(png: bytes) -> list[str]:
     data = _vision_json("read_text", png, READ_TEXT_PROMPT, "text_read", TEXT_SCHEMA)
     return [str(t) for t in data.get("text", [])]

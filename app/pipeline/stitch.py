@@ -27,8 +27,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 from shapely import affinity
-from shapely.geometry import LineString, Polygon
-from shapely.ops import unary_union
+from shapely.geometry import LineString, MultiPoint, Point, Polygon
+from shapely.ops import unary_union, voronoi_diagram
 from shapely.prepared import prep
 
 from .classify import column_rails
@@ -274,26 +274,28 @@ def _sections(rows: list) -> list:
     return sections
 
 
-def _row_xs(a: float, b: float, i: int, length: float) -> list:
-    """Needle positions along one row from a to b, staggered by row number."""
-    off = STAGGER[i % len(STAGGER)] * length
+def _row_xs(a: float, b: float, i: int, length: float, rng=None, jitter: float = 0.0) -> list:
+    """Needle positions along one row from a to b, staggered by row number. With `rng`, the
+    stagger and every stitch length vary at random by up to `jitter` (a textured fill)."""
+    off = (rng.random() if rng is not None else STAGGER[i % len(STAGGER)]) * length
     gap = max(0.8, 0.25 * length)        # keep clear of the ends so no stitch is tiny
     xs = [a]
     x = off + math.ceil((a + gap - off) / length) * length
     while x < b - gap:
         xs.append(x)
-        x += length
+        x += length * (1.0 + (rng.uniform(-jitter, jitter) if rng is not None else 0.0))
     if len(xs) == 1 and b - a > length:      # no grid point landed in a longish row: halve it
         xs.append((a + b) / 2)
     xs.append(b)
     return xs
 
 
-def _section_points(sec: list, top_first: bool, left_first: bool, length: float) -> list:
+def _section_points(sec: list, top_first: bool, left_first: bool, length: float,
+                    rng=None, jitter: float = 0.0) -> list:
     rows = sec if top_first else sec[::-1]
     pts, left = [], left_first
     for i, y, a, b in rows:
-        xs = _row_xs(a, b, i, length)
+        xs = _row_xs(a, b, i, length, rng, jitter)
         if not left:
             xs = xs[::-1]
         pts.extend((x, y) for x in xs)
@@ -454,10 +456,18 @@ def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
 
 def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float,
                   start=None, travel_step: float = 2.5,
-                  extend: float = 0.0) -> list[list[tuple[float, float]]]:
-    """Fill a polygon with rows at the given angle. Returns one or more thread segments."""
+                  extend: float = 0.0, rng=None, jitter: float = 0.0,
+                  ragged: float = 0.0) -> list[list[tuple[float, float]]]:
+    """Fill a polygon with rows at the given angle. Returns one or more thread segments.
+    With `rng`: random needle placement (`jitter`) and row ends cut back at random by up to
+    `ragged` mm, so the fill has a soft, uneven edge (foliage, fur, grass)."""
     rot = affinity.rotate(poly, -angle_deg, origin=(0, 0))
-    sections = _sections(_rows(rot, spacing, extend))
+    rows = _rows(rot, spacing, extend)
+    if rng is not None and ragged > 0:
+        rows = [(i, y, [(a + rng.uniform(0, ragged), b - rng.uniform(0, ragged))
+                        for a, b in pairs if b - a > 2 * ragged + MIN_ROW_MM])
+                for i, y, pairs in rows]
+    sections = _sections(rows)
     if not sections:
         return []
     inside = prep(rot.buffer(INSIDE_TOL_MM + extend))
@@ -481,7 +491,7 @@ def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float
                 break
         _, s, top, left = best
         todo.remove(s)
-        pts = _section_points(sections[s], top, left, length)
+        pts = _section_points(sections[s], top, left, length, rng, jitter)
         if seg:
             walk = _travel(seg[-1], pts[0], inside, router, travel_step)
             if walk is None:
@@ -553,6 +563,73 @@ def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
     return segments
 
 
+TEXTURE = {"jitter": 0.25, "ragged": 0.6, "length": 4.0, "second_turn": 40.0}
+
+
+def stitch_texture(obj: dict, rules: dict) -> list:
+    """Foliage and other soft masses (deep-dive rule 17, Erich Campbell's tree recipe): two
+    half-density layers at different angles, the top one with random needle placement
+    (25 %), 4 mm stitches, and a jagged edge (row ends cut back at random by up to 0.6 mm)
+    instead of a hard, single-angle silhouette. A light hidden underlay holds it flat."""
+    poly = obj["poly"]
+    seed = int(abs(poly.centroid.x * 1000 + poly.centroid.y * 37)) % (2 ** 31)
+    rng = np.random.default_rng(seed)
+    angle = obj.get("angle", 70.0)
+    # As dark as the drawing was, but never more than about half density: foliage that
+    # covers the fabric completely sews as a hard, heavy blob (Campbell builds trees from
+    # half-density layers so the fabric shows through). A light drawing gets an even more
+    # open layer. "solid" textures (fur, a texture the user asked for) may use both layers.
+    ink = float(min(obj.get("max_ink", 0.55), max(0.2, obj.get("ink", 1.0))))
+    spacing = rules["fill_spacing_mm"] * 2.5 if ink >= 0.6 else min(2.5, rules["fill_spacing_mm"] / ink)
+    turns = (0.0, TEXTURE["second_turn"]) if ink >= 0.6 else (0.0,)
+    cover = prep(poly.buffer(INSIDE_TOL_MM))
+    router = _Router(poly, cover)
+    segments: list = []
+    if rules.get("underlay") and ink >= 0.6:
+        inner = poly.buffer(-0.8)
+        for part in polygons_of(inner):
+            if part.area > 4.0:
+                start = segments[-1][-1] if segments else None
+                _append(segments, fill_segments(part, angle + 90.0, 3.5, 4.0, start), cover, router)
+    # Foliage is built from clumps, each facing a slightly different way (Jesse Elliott's
+    # "random tatami clumps, mostly vertical"), not one even hatch across the whole tree.
+    for clump in _clumps(poly, rng):
+        tilt = rng.uniform(-22.0, 22.0)
+        for k, turn in enumerate(turns):
+            start = segments[-1][-1] if segments else None
+            layer = fill_segments(clump, angle + tilt + turn, spacing, TEXTURE["length"], start,
+                                  rng=rng, jitter=TEXTURE["jitter"] if (k or len(turns) == 1) else 0.1,
+                                  ragged=TEXTURE["ragged"])
+            _append(segments, layer, cover, router)
+    return segments
+
+
+def _clumps(poly: Polygon, rng, size: float = 10.0) -> list:
+    """Split a mass into clumps about `size` mm across (Voronoi cells around scattered
+    points), overlapping a little so no gaps show between them."""
+    minx, miny, maxx, maxy = poly.bounds
+    n = int(max(1, min(40, poly.area / (size * size))))
+    if n <= 1:
+        return [poly]
+    pts = []
+    tries = 0
+    while len(pts) < n and tries < 50 * n:
+        tries += 1
+        x, y = rng.uniform(minx, maxx), rng.uniform(miny, maxy)
+        if poly.contains(Point(x, y)):
+            pts.append(Point(x, y))
+    if len(pts) <= 1:
+        return [poly]
+    cells = voronoi_diagram(MultiPoint(pts), envelope=poly.envelope.buffer(1.0))
+    out = []
+    for cell in cells.geoms:
+        piece = cell.buffer(0.3).intersection(poly)
+        out.extend(q for q in polygons_of(piece) if q.area > 1.0)
+    # sew the clumps bottom to top, left to right, so the thread works across the tree
+    out.sort(key=lambda q: (-round(q.centroid.y / size), q.centroid.x))
+    return out or [poly]
+
+
 def knockdown(objects: list, rules: dict) -> dict | None:
     """For towels and other deep pile: a very open criss-cross of stitches under the whole
     design, sewn first in thread that matches the fabric, to flatten the loops so the design
@@ -603,6 +680,9 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
         elif obj["kind"] == "satin":
             segments = stitch_satin(obj, rules)
             shape = obj["outline"]
+        elif obj.get("texture"):
+            segments = stitch_texture(obj, rules)
+            shape = obj["poly"]
         else:
             # neighbouring colors get crossing angles so they don't all pull the same way;
             # a row of lettering shares one angle so the letters look alike

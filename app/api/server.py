@@ -249,6 +249,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                      fabric: str = Form("tshirt"), size_in: float | None = Form(None),
                      density: int = Form(0), inside: str = Form("auto"),
                      drop_text_mm: float = Form(0.0), letters: str = Form("auto"),
+                     ai_assist: str = Form("auto"),
                      edits: str = Form("[]")):
     """Digitize either a version chosen on the Clean up screen (cleanup_id + version), or a
     picture uploaded directly (file + size + fabric)."""
@@ -285,12 +286,16 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         side = min(12.0, max(0.5, float(size_in))) * config.MM_PER_INCH
         fit = (side, side)
 
+    # ChatGPT helps plan the stitches when it is connected, unless the user turned it off
+    assist = ai_assist == "on" or (ai_assist == "auto" and ai.available())
+
     def work():
         say = lambda label: job.__setitem__("label", label)  # noqa: E731
         result = run_pipeline(get_data(say), config.data_dir() / "jobs" / job_id, name,
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
                               max_colors=colors, density=density, hints=hints, inside=inside,
                               edits=edit_list, project=made, progress=say, letters=letters,
+                              ai_assist=assist,
                               overrides={"drop_text_mm": drop_text_mm} if drop_text_mm > 0 else None)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")

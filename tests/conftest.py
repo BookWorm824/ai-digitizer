@@ -45,6 +45,8 @@ class FakeOpenAI:
         self.text = list(text)
         self.redraw_text = list(text if redraw_text is None else redraw_text)
         self.fail_with = fail_with
+        self.plan = {"parts": [], "foliage": [], "notes": []}      # digitizing plan answer
+        self.review = {"verdict": "good", "changes": [], "foliage": [], "notes": []}
         self.vision_calls = 0
         self.image_calls = 0
         self.prompts: list[str] = []
@@ -59,7 +61,11 @@ class FakeOpenAI:
         name = kw["text"]["format"]["name"]
         assert kw["text"]["format"]["strict"] is True
         assert kw["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
-        if name == "embroidery_analysis":
+        if name == "digitizing_plan":
+            data = self.plan
+        elif name == "stitch_review":
+            data = self.review
+        elif name == "embroidery_analysis":
             data = {"subject_type": "logo", "key_elements": ["badge", "star"], "text": self.text,
                     "color_count": 3, "fine_detail_risk": "low"}
         else:

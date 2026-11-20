@@ -210,6 +210,8 @@ dialog .actions { border-top: 0; padding-top: 0; margin-top: 22px; }
 }
 .areaMenu strong { font: 600 16px var(--serif); padding: 0 2px 2px; }
 .areaMenu button { min-height: 40px; padding: 8px 12px; text-align: left; }
+.aiNotes { margin: 10px 0 0; padding: 10px 12px 10px 30px; border-radius: 12px; background: var(--accent-soft); font-size: 15px; }
+.aiNotes li { margin: 3px 0; }
 .retypeForm { display: grid; gap: 8px; padding: 6px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .retypeForm label, .wordsPanel label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
 .retypeForm input, .retypeForm select, .wordsPanel input[type=text], .wordsPanel select, #lettersMode {
