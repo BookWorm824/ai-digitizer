@@ -32,6 +32,11 @@ KIND_ORDER = ("fill", "satin", "run")
 CAP_BAND_MM = 20.0
 
 
+class _NewLetter(list):
+    """The first stretch of thread of a letter. The hop to it is sewn through only where it
+    is hidden: even a short visible hop joins two letters (a period becomes a comma)."""
+
+
 def _clean_segment(pts: list, min_len: float, max_len: float) -> list:
     """Drop stitches shorter than min_len, split stitches longer than max_len."""
     if len(pts) < 2:
@@ -145,8 +150,20 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         for color in colors:
             segs: list = []
             for kind in KIND_ORDER:
-                part, pos = _nearest_first(
-                    [o for o in group if o["color"] == color and o["kind"] == kind], pos)
+                mine = [o for o in group if o["color"] == color and o["kind"] == kind]
+                # lettering is sewn in its own order: letter by letter, left to right, each
+                # letter's strokes as the font planned them (research rule 36)
+                lettered = sorted((o for o in mine if o.get("seq") is not None),
+                                  key=lambda o: o["seq"])
+                last = None
+                for o in lettered:
+                    first, *rest = o["segments"]
+                    letter = o["seq"][:2]
+                    segs.append(_NewLetter(first) if letter != last else first)
+                    segs.extend(rest)
+                    last = letter
+                    pos = o["segments"][-1][-1]
+                part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)
                 segs.extend(part)
             if not segs:
                 continue
@@ -177,8 +194,9 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         joined = []
         for sg in raw_segments:
             hop = dist(joined[-1][-1], sg[0]) if joined else None
+            short_ok = hop is not None and hop <= ALWAYS_JOIN_MM and not isinstance(sg, _NewLetter)
             ok = hop is not None and hop <= rules["trim_jump_mm"] and (
-                hop <= ALWAYS_JOIN_MM or hidden is None
+                short_ok or hidden is None
                 or hidden.contains(LineString([joined[-1][-1], sg[0]])))
             if ok:
                 joined[-1] = joined[-1] + list(sg)

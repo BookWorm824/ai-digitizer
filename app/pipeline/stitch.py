@@ -599,8 +599,9 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             shape = obj["poly"]
         if segments:
             stitched.append({"kind": obj["kind"], "color": obj["color"], "segments": segments,
-                             "reversible": obj["kind"] == "run", "shape": shape,
-                             "area_mm2": obj.get("area_mm2", 0.0)})
+                             "reversible": obj["kind"] == "run" and obj.get("seq") is None,
+                             "shape": shape, "area_mm2": obj.get("area_mm2", 0.0),
+                             "seq": obj.get("seq")})
     if rules.get("knockdown") and stitched:
         base = knockdown(classified["objects"], rules)
         if base:

@@ -222,10 +222,12 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
 
     # 5. still too many colors? merge the two closest until it fits
     room = max_colors - (1 if enclosed_background() is not None else 0)
+    squeezed = False               # a color was merged only to keep a slot for the blanks
     while True:
         sewn = [c for c in alive if c != bg_id]
         if len(sewn) <= max(1, room):
             break
+        squeezed = squeezed or (room < max_colors and len(sewn) <= max_colors)
         d, a, b = closest_pair(sewn)
         if area(a) < area(b):
             a, b = b, a
@@ -280,7 +282,7 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
     inside_color = ids.index(inside_label) if inside_label in ids else None
     result = {"labels": out, "palette": palette, "ppm": float(ppm), "inside_color": inside_color,
               "has_background": bool(alpha_w is not None or bg_id is not None),
-              "inside": dict(found)}
+              "inside": dict(found), "squeezed": squeezed}
     if debug_dir is not None:
         dbg = render(result, checker=True)
         save_debug(debug_dir, "04_clean.png", dbg[:, :, ::-1])

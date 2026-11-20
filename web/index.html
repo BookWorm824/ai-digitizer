@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Embroidery Digitizer</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="digitizer.png">
 </head>
 <body>
   <header>
@@ -142,6 +143,12 @@
             <canvas id="preview"></canvas>
             <div id="areaMenu" class="areaMenu" hidden>
               <strong>This part</strong>
+              <button id="areaRetype" type="button" hidden>Retype the words</button>
+              <div id="retypeForm" class="retypeForm" hidden>
+                <label>Words<input id="retypeText" type="text" maxlength="80" autocomplete="off"></label>
+                <label>Style<select id="retypeStyle"><option value="block">Block</option><option value="bold">Bold</option><option value="varsity">Varsity</option></select></label>
+                <button id="retypeGo" type="button" class="primary">Use these words</button>
+              </div>
               <button id="areaColor" type="button">Change color</button>
               <button id="areaOutline" type="button">Outline only</button>
               <button id="areaDelete" type="button">Delete</button>
@@ -156,11 +163,27 @@
               <canvas id="simStrip" width="1000" height="10" aria-hidden="true"></canvas>
             </div>
           </div>
-          <p class="hint">Click any part of the design to change its color, make it outline-only, or delete it.</p>
+          <p class="hint" id="clickHint">Click any part of the design to change its color, make it outline-only, or delete it.</p>
           <div class="toolRow">
             <div class="swatches" id="garmentColors" aria-label="Garment color"></div>
+            <button id="addWordsBtn" type="button" class="quiet">Add words</button>
             <button id="actualBtn" type="button" class="quiet">Actual size</button>
             <button id="undoBtn" type="button" class="quiet" hidden>Undo last change</button>
+          </div>
+          <div id="wordsPanel" class="wordsPanel" hidden>
+            <label class="wide">Words<input id="wordsText" type="text" maxlength="80" autocomplete="off"
+                   placeholder="Type your words"></label>
+            <label>Letter height<select id="wordsSize">
+              <option value="0.25">¼ inch</option><option value="0.375">⅜ inch</option>
+              <option value="0.5" selected>½ inch</option><option value="0.75">¾ inch</option>
+              <option value="1">1 inch</option><option value="1.5">1½ inches</option>
+              <option value="2">2 inches</option></select></label>
+            <label>Style<select id="wordsStyle"><option value="block">Block</option><option value="bold">Bold</option><option value="varsity">Varsity</option></select></label>
+            <label>Thread<input id="wordsColor" type="color" value="#222222"></label>
+            <div class="row">
+              <button id="wordsPlace" type="button" class="primary">Put them on the design</button>
+              <button id="wordsCancel" type="button" class="link">Cancel</button>
+            </div>
           </div>
         </div>
         <aside>
@@ -186,6 +209,15 @@
           <p class="hint">Fewer colors sew faster. Click a color below to change it.</p>
           <div id="threadChips" class="threadChips"></div>
           <input id="chipPicker" type="color" hidden>
+          <div id="lettersRow" class="control" hidden>
+            <span>Words</span>
+            <select id="lettersMode" aria-label="How to sew the words">
+              <option value="auto">Best for the size</option>
+              <option value="retype">Embroidery lettering</option>
+              <option value="trace">Keep the picture's letters</option>
+            </select>
+          </div>
+          <p id="lettersHint" class="hint" hidden></p>
           <label id="insideRow" class="check" hidden>
             <input id="insideBox" type="checkbox">
             <span>Sew the blank areas inside the design</span>

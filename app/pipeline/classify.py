@@ -37,6 +37,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 from skimage.morphology import skeletonize
 
+from . import lettering
 from .common import canvas_for, dist, polygons_of, save_debug
 
 SKEL_PPM = 12.0          # resolution used to find centre lines
@@ -59,6 +60,7 @@ SERIF_SMALL_MM = 8.0     # under this cap height, hairline serifs are dropped (r
 NETWORK_HOLES = 3        # a narrow shape with this many openings is a web of outlines
 NETWORK_MAX_MM = 2.0     # ...and is sewn as lines when its strokes are thinner than this
 GLYPH_STROKE_RATIO = 0.42  # stroke width / height of a letter (a solid square is 0.5)
+RETYPE_AUTO_MM = 8.0     # "auto" retypes known words shorter than this (research rules 5, 6)
 
 
 # ------------------------------------------------------------------------------ skeletons
@@ -617,7 +619,10 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
     return out
 
 
-def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
+def run(vec: dict, rules: dict, debug_dir: Path | None = None,
+        text: list[str] | None = None, letters: str = "auto") -> dict:
+    """Choose how every shape is sewn. `text` is the words known to be in the picture (read
+    by ChatGPT); `letters` is auto | retype | trace (see the lettering rows below)."""
     satin_min = rules["satin_min_mm"]
     satin_half = rules["satin_max_mm"] / 2.0
     min_area = 0.6 * rules["min_detail_mm"] ** 2
@@ -626,6 +631,19 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     order = sewing_order(vec["layers"], rules["satin_max_mm"])
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
     rows = text_rows(shapes, order, rules)
+    inside = vec.get("inside_color")
+    if inside is not None and rows:
+        # the insides of big letters (sewn blank areas) can look like a row of letters too
+        hulls = [Polygon(shapes[c][i].exterior).buffer(0.3) for c, i in rows if c != inside]
+        groups = {}
+        for (c, i), info in rows.items():
+            if c == inside:
+                groups.setdefault(info["row"], []).append((c, i))
+        for keys in groups.values():
+            held = sum(1 for c, i in keys if any(h.contains(shapes[c][i]) for h in hulls))
+            if held >= 0.6 * len(keys):
+                for k in keys:
+                    del rows[k]
 
     objects, dropped = [], 0
 
@@ -685,26 +703,23 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     done = set()
     inside = vec.get("inside_color")
     if inside is not None and inside in shapes and rows:
-        letters = [Polygon(shapes[c][i].exterior).buffer(0.3) for c, i in rows]
+        hulls = [Polygon(shapes[c][i].exterior).buffer(0.3) for c, i in rows]
         for i, blank in enumerate(shapes[inside]):
-            if any(L.contains(blank) for L in letters):
+            if any(h.contains(blank) for h in hulls):
                 done.add((inside, i))
-    by_row = {}
-    for key, info in rows.items():
-        by_row.setdefault(info["row"], []).append(key)
-    for row, keys in by_row.items():
-        height = rows[keys[0]]["height"]
-        if height < rules.get("drop_text_mm", 0.0):
-            done.update(keys)          # the user chose to leave this tiny text out
-            continue
+
+    def trace_row(row, keys, height):
+        """Sew a row of traced letters one consistent way: satin when (nearly) every letter
+        is a clean set of columns; otherwise small letters become run lettering (a fill
+        across 1 mm strokes looks ragged) and large letters are all filled at one angle."""
         style = _text_style(height, rules)
-        glyphs = [(c, i, shapes[c][i]) for c, i in sorted(keys, key=lambda k: shapes[k[0]][k[1]].bounds[0])]
+        glyphs = [(c, i, shapes[c][i]) for c, i in keys]
         if height < rules["text_run_mm"]:
             # too small for satin: run-stitch lettering, short stitches so curves keep shape
             for c, i, g in glyphs:
                 if add_lines(g, c, stitch_mm=1.5, min_len=0.8):
                     done.add((c, i))
-            continue
+            return
         tried = []
         small = height < SERIF_SMALL_MM
         for c, i, g in glyphs:
@@ -718,9 +733,6 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
         if passing and np.mean(passing) > ROW_MEAN_COLUMNS:
             satin_share = 0.0            # heavy serif lettering: a clean fill beats a patchwork
         angle = 45.0 if row % 2 == 0 else 135.0
-        # One way for the whole word: satin when (nearly) every letter is a clean set of
-        # columns; otherwise small letters become run lettering (a fill across 1 mm strokes
-        # looks ragged) and large letters are all filled at one shared angle.
         if satin_share >= ROW_SATIN_SHARE:
             mode = "satin"
         elif small:
@@ -735,6 +747,54 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             else:
                 add_fill(g, c, angle, style)
             done.add((c, i))
+
+    # ---- lettering, one row at a time
+    by_row = {}
+    for key, info in rows.items():
+        by_row.setdefault(info["row"], []).append(key)
+    row_info, row_keys = [], {}
+    for row, keys in by_row.items():
+        keys = sorted(keys, key=lambda k: shapes[k[0]][k[1]].bounds[0])
+        row_keys[row] = keys
+        row_info.append({"row": row, "color": keys[0][0], "height": rows[keys[0]]["height"],
+                         "text": None, "glyphs": [shapes[c][i] for c, i in keys]})
+    # Research rule 6: retype known words in the embroidery font rather than trace them.
+    # "auto" does it where tracing struggles (letters under RETYPE_AUTO_MM, where serifs and
+    # fine detail fill in); "retype" does it for every row it can match. Each known word can
+    # be claimed by one row only: the best match wins.
+    fits = {}
+    if letters != "trace" and text:
+        for info in row_info:
+            h = info["height"]
+            if h >= rules.get("drop_text_mm", 0.0) and (letters == "retype" or h < RETYPE_AUTO_MM):
+                fit = lettering.fit_row(info["glyphs"], text, "block", rules["satin_max_mm"])
+                if fit:
+                    fits[info["row"]] = fit
+        claimed = []
+        for row, fit in sorted(fits.items(), key=lambda kv: -kv[1]["score"]):
+            line, a, b = fit["words"]
+            if any(line == l2 and a < b2 and a2 < b for l2, a2, b2 in claimed):
+                del fits[row]
+            else:
+                claimed.append((line, a, b))
+    for info in row_info:
+        row, height = info["row"], info["height"]
+        keys = row_keys[row]
+        if height < rules.get("drop_text_mm", 0.0):
+            done.update(keys)          # the user chose to leave this tiny text out
+            continue
+        start = len(objects)
+        fit = fits.get(row)
+        if fit:
+            info["text"] = fit["text"]
+            pls = fit["placements"]
+            objects.extend(lettering.objects(pls, info["color"], rules, "block",
+                                             lettering.text_style(pls[0].H), group=row, row=row))
+            done.update(keys)
+            continue
+        trace_row(row, keys, height)
+        for o in objects[start:]:
+            o["text_row"] = row
 
     # ---- everything else
     for color in order:
@@ -770,31 +830,36 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
                 sew_narrow(piece, color)
 
     if debug_dir is not None and objects:
-        geoms = [o["poly"] if o["kind"] == "fill" else o["outline"] if o["kind"] == "satin"
-                 else o["line"] for o in objects]
-        img, to_px = canvas_for(unary_union(geoms).bounds, 8.0, color=(255, 255, 255))
-        # fills = green, satin = blue with its centre line, runs = red (bean runs thicker)
-        for o in objects:
-            if o["kind"] == "fill":
-                rings = [to_px(o["poly"].exterior.coords).astype(np.int32)]
-                rings += [to_px(r.coords).astype(np.int32) for r in o["poly"].interiors]
-                cv2.fillPoly(img, rings, (170, 220, 170), lineType=cv2.LINE_AA)
-                cv2.polylines(img, rings, True, (60, 140, 60), 1, cv2.LINE_AA)
-        for o in objects:
-            if o["kind"] == "satin":
-                for p in polygons_of(o["outline"]):
-                    ring = to_px(p.exterior.coords).astype(np.int32)
-                    cv2.fillPoly(img, [ring], (240, 200, 150), lineType=cv2.LINE_AA)
-                    cv2.polylines(img, [ring], True, (200, 120, 40), 1, cv2.LINE_AA)
-                cv2.polylines(img, [to_px(o["center"]).astype(np.int32)], False,
-                              (160, 60, 0), 1, cv2.LINE_AA)
-        for o in objects:
-            if o["kind"] == "run":
-                cv2.polylines(img, [to_px(o["line"].coords).astype(np.int32)], False,
-                              (40, 40, 220), 3 if o["bean"] else 1, cv2.LINE_AA)
-        save_debug(debug_dir, "06_classify.png", img)
+        debug_picture(objects, debug_dir)
 
     heights = sorted({round(rows[k[0]]["height"], 2) for k in by_row.values()})
     kept = [h for h in heights if h >= rules.get("drop_text_mm", 0.0)]
     return {"objects": objects, "dropped_details": dropped, "order": order,
-            "text_rows": len(by_row), "text_heights": kept}
+            "text_rows": len(by_row), "text_heights": kept, "rows": row_info,
+            "retyped": sum(1 for r in row_info if r["text"])}
+
+
+def debug_picture(objects: list, debug_dir: Path) -> None:
+    """06_classify.png: fills green, satin blue with its centre line, runs red."""
+    geoms = [o["poly"] if o["kind"] == "fill" else o["outline"] if o["kind"] == "satin"
+             else o["line"] for o in objects]
+    img, to_px = canvas_for(unary_union(geoms).bounds, 8.0, color=(255, 255, 255))
+    for o in objects:
+        if o["kind"] == "fill":
+            rings = [to_px(o["poly"].exterior.coords).astype(np.int32)]
+            rings += [to_px(r.coords).astype(np.int32) for r in o["poly"].interiors]
+            cv2.fillPoly(img, rings, (170, 220, 170), lineType=cv2.LINE_AA)
+            cv2.polylines(img, rings, True, (60, 140, 60), 1, cv2.LINE_AA)
+    for o in objects:
+        if o["kind"] == "satin":
+            for p in polygons_of(o["outline"]):
+                ring = to_px(p.exterior.coords).astype(np.int32)
+                cv2.fillPoly(img, [ring], (240, 200, 150), lineType=cv2.LINE_AA)
+                cv2.polylines(img, [ring], True, (200, 120, 40), 1, cv2.LINE_AA)
+            cv2.polylines(img, [to_px(o["center"]).astype(np.int32)], False,
+                          (160, 60, 0), 1, cv2.LINE_AA)
+    for o in objects:
+        if o["kind"] == "run":
+            cv2.polylines(img, [to_px(o["line"].coords).astype(np.int32)], False,
+                          (40, 40, 220), 3 if o["bean"] else 1, cv2.LINE_AA)
+    save_debug(debug_dir, "06_classify.png", img)

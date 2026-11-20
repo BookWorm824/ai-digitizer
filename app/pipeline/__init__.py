@@ -13,8 +13,8 @@ from typing import Callable
 from .. import config, threads
 from shapely.ops import unary_union
 
-from . import (analyze, classify, clean, edits as edits_stage, export, intake, ith, optimize,
-               sequence, stitch, validate, vectorize)
+from . import (analyze, classify, clean, edits as edits_stage, export, intake, ith, lettering,
+               optimize, sequence, stitch, validate, vectorize)
 from .common import PipelineError, hex_of
 
 __all__ = ["run_pipeline", "PipelineError"]
@@ -37,6 +37,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  max_colors: int | None = None, overrides: dict | None = None,
                  density: int = 0, hints: dict | None = None, inside: str = "auto",
                  edits: list | None = None, project: dict | None = None,
+                 letters: str = "auto",
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
@@ -67,13 +68,28 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     vec = vectorize.run(cleaned, fit_w_mm, fit_h_mm, rules, debug_dir)
     vec["inside_color"] = cleaned.get("inside_color")
     say("classify")
-    classified = classify.run(vec, rules, debug_dir)
+    if letters not in ("auto", "retype", "trace"):
+        letters = "auto"
+    classified = classify.run(vec, rules, debug_dir, text=(hints or {}).get("text"),
+                              letters=letters)
+    inside_c = cleaned.get("inside_color")
+    if (cleaned.get("squeezed") and inside_c is not None
+            and not any(o["color"] == inside_c for o in classified["objects"])):
+        # The slot kept for blank areas went unused (they were all the insides of letters,
+        # left as open fabric), but it cost the design a color: clean up again without it.
+        rules = dict(rules, max_colors=rules["max_colors"] + 1)
+        cleaned = clean.run(img, fit_w_mm, fit_h_mm, rules, debug_dir)
+        vec = vectorize.run(cleaned, fit_w_mm, fit_h_mm, rules, debug_dir)
+        vec["inside_color"] = cleaned.get("inside_color")
+        classified = classify.run(vec, rules, debug_dir, text=(hints or {}).get("text"),
+                                  letters=letters)
+        rules["max_colors"] -= 1
     palette = list(cleaned["palette"])
     bx0, by0, bx1, by1 = vec["bounds"]
     ref = max(bx1 - bx0, by1 - by0)         # what click positions are fractions of
     applied = 0
     if edits:                               # the user's own changes, made on the preview
-        classified, palette, applied = edits_stage.apply(classified, palette, edits, ref)
+        classified, palette, applied = edits_stage.apply(classified, palette, edits, ref, rules)
         if not classified["objects"]:
             raise PipelineError("There is nothing left to stitch. Undo your last change.")
     say("stitch")
@@ -151,7 +167,11 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),
                     "threads": None if b.get("label") else threads.match_all(b["rgb"]),
                     "stitches": sum(len(s) for s in b["segments"])} for b in plan["blocks"]],
-        "areas": edits_stage.areas(classified["objects"], palette),
+        "areas": edits_stage.areas(classified["objects"], palette, classified.get("rows")),
+        "lettering": {"rows": len(classified.get("rows", [])),
+                      "retyped": sum(1 for r in classified.get("rows", []) if r.get("text")),
+                      "mode": letters,
+                      "styles": [{"id": k, "name": v["name"]} for k, v in lettering.STYLES.items()]},
         "ref": round(ref, 3),
         "edits_applied": applied,
         "blocks": [{"hex": hex_of(b["rgb"]),

@@ -96,6 +96,8 @@ const state = {
   density: 0,               // softer (-2) .. denser (+2)
   inside: 'auto',           // blank areas inside the design: auto | sew | open
   dropTextMm: 0,            // text shorter than this is left out (a one-click fix)
+  letters: 'auto',          // words: auto | retype (embroidery lettering) | trace
+  placing: null,            // words waiting for a click to say where they go
   moreFabrics: false,
   jobId: null,
   result: null,
@@ -313,6 +315,7 @@ async function startCleanup() {
   state.density = 0;
   state.inside = 'auto';
   state.dropTextMm = 0;
+  state.letters = 'auto';
   state.edits = [];
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
@@ -512,6 +515,7 @@ async function startJob(force) {
   form.append('density', String(state.density));
   form.append('inside', state.inside);
   form.append('drop_text_mm', String(state.dropTextMm));
+  form.append('letters', state.letters);
   form.append('edits', JSON.stringify(state.edits));
   if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
@@ -586,6 +590,7 @@ function showResult() {
   $('#insideRow').hidden = !r.inside.present;
   $('#insideBox').checked = r.inside.sewn;
   $('#undoBtn').hidden = state.edits.length === 0;
+  renderLettering(r);
   renderThreadChips();
   draw();
   renderDownload();
@@ -799,13 +804,19 @@ function playSim() {
 }
 
 // ───────────────────────── clicking the design to change it ─────────────────────────
-function areaAt(clientX, clientY) {
+function pointAt(clientX, clientY) {
   const r = state.result;
   const cv = $('#preview');
   const box = cv.getBoundingClientRect();
   const dpr = cv.width / box.width;
   const x = (((clientX - box.left) * dpr) * sim.k - sim.ox) / sim.s;     // millimetres
   const y = (((clientY - box.top) * dpr) * sim.k - sim.oy) / sim.s;
+  return { x, y, at: [x / r.ref, y / r.ref] };
+}
+
+function areaAt(clientX, clientY) {
+  const r = state.result;
+  const { x, y } = pointAt(clientX, clientY);
   let best = null;
   for (const a of r.areas) {
     const ring = a.ring;
@@ -830,6 +841,29 @@ function addEdit(edit) {
   state.edits.push(edit);
   closeAreaMenu();
   startJob(true);
+}
+
+// The "Words" choice, shown when the design has lettering in it.
+function renderLettering(r) {
+  const info = r.lettering || { rows: 0, retyped: 0 };
+  $('#lettersRow').hidden = info.rows === 0;
+  $('#lettersMode').value = state.letters;
+  const hint = $('#lettersHint');
+  hint.hidden = info.rows === 0;
+  if (state.letters === 'trace') {
+    hint.textContent = 'The words are sewn from the picture\'s own letters.';
+  } else if (info.retyped > 0) {
+    hint.textContent = 'Words in embroidery lettering sew sharper than letters traced from a picture. ' +
+      'Click a word to change it.';
+  } else {
+    hint.textContent = 'Click a word on the design to retype it in embroidery lettering.';
+  }
+}
+
+function stopPlacing() {
+  state.placing = null;
+  $('#stage').classList.remove('placing');
+  $('#clickHint').textContent = 'Click any part of the design to change its color, make it outline-only, or delete it.';
 }
 
 function renderThreadChips() {
@@ -912,6 +946,13 @@ function setupScreen3() {
   $('#undoBtn').addEventListener('click', () => { state.edits.pop(); startJob(true); });
   $('#preview').addEventListener('click', (e) => {
     if (!state.result || sim.playing) return;
+    if (state.placing) {                       // putting new words where the click is
+      const { at } = pointAt(e.clientX, e.clientY);
+      const words = state.placing;
+      stopPlacing();
+      addEdit({ type: 'text', text: words.text, at, size: words.size, style: words.style, hex: words.hex });
+      return;
+    }
     const hit = areaAt(e.clientX, e.clientY);
     if (!hit) { closeAreaMenu(); return; }
     picked = hit;
@@ -919,10 +960,45 @@ function setupScreen3() {
     const stage = $('#stage').getBoundingClientRect();
     menu.hidden = false;
     $('#areaOutline').hidden = hit.area.kind === 'run';
+    $('#areaRetype').hidden = !hit.area.text;
+    $('#retypeForm').hidden = true;
     menu.style.left = Math.max(4, Math.min(e.clientX - stage.left + $('#stage').scrollLeft, stage.width - 190)) + 'px';
     menu.style.top = Math.max(4, Math.min(e.clientY - stage.top - 20, stage.height - menu.offsetHeight - 4)) + $('#stage').scrollTop + 'px';
   });
   $('#areaCancel').addEventListener('click', closeAreaMenu);
+  $('#areaRetype').addEventListener('click', () => {
+    if (!picked) return;
+    $('#retypeText').value = picked.area.words || '';
+    $('#retypeForm').hidden = false;
+    $('#areaRetype').hidden = true;
+    $('#retypeText').focus();
+  });
+  const retype = () => picked && addEdit({ type: 'retype', at: picked.at,
+    text: $('#retypeText').value.trim(), style: $('#retypeStyle').value });
+  $('#retypeGo').addEventListener('click', retype);
+  $('#retypeText').addEventListener('keydown', (e) => { if (e.key === 'Enter') retype(); });
+  $('#lettersMode').addEventListener('change', (e) => { state.letters = e.target.value; startJob(true); });
+  $('#addWordsBtn').addEventListener('click', () => {
+    const panel = $('#wordsPanel');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) {
+      const colors = (state.result ? state.result.colors : []).filter((c) => !c.label);
+      if (colors.length) $('#wordsColor').value = colors[colors.length - 1].hex;
+      $('#wordsText').focus();
+    }
+  });
+  $('#wordsCancel').addEventListener('click', () => { $('#wordsPanel').hidden = true; stopPlacing(); });
+  $('#wordsPlace').addEventListener('click', () => {
+    const text = $('#wordsText').value.trim();
+    if (!text || !state.result) { $('#wordsText').focus(); return; }
+    const sizeMm = Number($('#wordsSize').value) * 25.4;
+    state.placing = { text, size: sizeMm / state.result.ref, style: $('#wordsStyle').value,
+      hex: $('#wordsColor').value };
+    $('#wordsPanel').hidden = true;
+    closeAreaMenu();
+    $('#stage').classList.add('placing');
+    $('#clickHint').textContent = 'Now click on the design where the words should go.';
+  });
   $('#areaDelete').addEventListener('click', () => picked && addEdit({ type: 'delete', at: picked.at }));
   $('#areaOutline').addEventListener('click', () => picked && addEdit({ type: 'outline', at: picked.at }));
   $('#areaColor').addEventListener('click', () => {
@@ -1050,7 +1126,7 @@ async function saveProject() {
   form.append('job_id', state.jobId);
   form.append('settings_json', JSON.stringify({
     version: state.version, colors: state.colors, sizeIn: state.sizeIn, density: state.density,
-    inside: state.inside, edits: state.edits, garment: state.garment,
+    inside: state.inside, edits: state.edits, garment: state.garment, letters: state.letters,
   }));
   try { await api('api/projects', { method: 'POST', body: form }); } catch { /* saving is a bonus */ }
 }
@@ -1107,6 +1183,7 @@ async function openProject(id) {
     state.density = st.density || 0;
     state.inside = st.inside || 'auto';
     state.edits = Array.isArray(st.edits) ? st.edits : [];
+    state.letters = st.letters || 'auto';
     state.garment = st.garment || state.garment;
     state.result = null;
     state.stitchedFor = null;

@@ -6,6 +6,12 @@
   {"type": "recolor", "from": "#...", "hex": "#..."}  change a thread color everywhere
                                                      (choosing a color already in the design
                                                      merges the two)
+  {"type": "retype",  "at": [u, v], "text": "...", "style": "block"}
+                                                    sew the clicked words in the embroidery
+                                                    font instead (empty text removes them)
+  {"type": "text",    "at": [u, v], "text": "...", "size": h, "style": "block",
+                      "hex": "#..."}                add words, centred on the click, with a
+                                                    cap height of h (a fraction of the size)
 
 `at` is the click position measured from the middle of the design, as a fraction of the
 design's size, so a change still lands on the same area after the design is resized.
@@ -17,7 +23,10 @@ from __future__ import annotations
 
 from shapely.geometry import LineString, Point
 
+from . import lettering
 from .common import hex_of, polygons_of
+
+TEXT_GROUP = 10000          # sewing-order groups for added words, after retyped rows
 
 
 def shape_of(obj: dict):
@@ -60,16 +69,45 @@ def _color_index(palette: list, order: list, rgb: tuple, after: int) -> int:
     return new
 
 
-def apply(classified: dict, palette: list, edits: list, ref: float) -> tuple[dict, list, int]:
+def _style(e: dict) -> str:
+    style = str(e.get("style") or "block")
+    return style if style in lettering.STYLES else "block"
+
+
+def _clean_text(value) -> str:
+    return " ".join(str(value or "").split())[:80]
+
+
+def apply(classified: dict, palette: list, edits: list, ref: float,
+          rules: dict | None = None) -> tuple[dict, list, int]:
     """Returns (classified with the edits applied, the palette, how many edits took effect).
-    `ref` is the design's size in mm, which `at` positions are fractions of."""
+    `ref` is the design's size in mm, which `at` positions are fractions of. `rules` are
+    needed to sew retyped or added words."""
     objects = list(classified["objects"])
     palette = [tuple(c) for c in palette]
     order = list(classified["order"])
+    rows = {r["row"]: dict(r) for r in classified.get("rows", [])}
+    rules = rules or {}
     applied = 0
-    for e in edits or []:
+    for n_edit, e in enumerate(edits or []):
         try:
             kind = e["type"]
+            if kind == "text":
+                text = _clean_text(e.get("text"))
+                size = float(e["size"]) * ref
+                if not lettering.letters_of(text) or not (1.0 <= size <= 200.0):
+                    continue
+                style = _style(e)
+                pls = lettering.layout(text, size, float(e["at"][0]) * ref,
+                                       float(e["at"][1]) * ref, style)
+                color = _color_index(palette, order, _rgb(e["hex"]), order[-1] if order else -1)
+                if color not in order:
+                    order.append(color)
+                objects.extend(lettering.objects(pls, color, rules, style,
+                                                 lettering.text_style(size),
+                                                 group=TEXT_GROUP + n_edit))
+                applied += 1
+                continue
             if kind == "recolor":
                 src, dst = _rgb(e["from"]), _rgb(e["hex"])
                 idx = [i for i, c in enumerate(palette) if tuple(c) == src]
@@ -89,6 +127,25 @@ def apply(classified: dict, palette: list, edits: list, ref: float) -> tuple[dic
             if n is None:
                 continue
             obj = objects[n]
+            if kind == "retype":
+                row = obj.get("text_row")
+                if row is None or row not in rows:
+                    continue
+                info = rows[row]
+                text = _clean_text(e.get("text"))
+                style = _style(e)
+                color = obj["color"]
+                objects = [o for o in objects if o.get("text_row") != row]
+                if text:
+                    pls = lettering.fit_box(text, info["glyphs"], style,
+                                            rules.get("satin_max_mm", 7.0))
+                    if pls:
+                        objects.extend(lettering.objects(pls, color, rules, style,
+                                                         lettering.text_style(pls[0].H),
+                                                         group=row, row=row))
+                info["text"] = text or None
+                applied += 1
+                continue
             if kind == "delete":
                 del objects[n]
             elif kind == "color":
@@ -109,12 +166,15 @@ def apply(classified: dict, palette: list, edits: list, ref: float) -> tuple[dic
         except (KeyError, ValueError, TypeError, IndexError):
             continue                            # a malformed edit is skipped, never fatal
     used = {o["color"] for o in objects}
-    return (dict(classified, objects=objects, order=[c for c in order if c in used]),
+    return (dict(classified, objects=objects, order=[c for c in order if c in used],
+                 rows=list(rows.values())),
             palette, applied)
 
 
-def areas(objects: list, palette: list) -> list:
-    """What the preview needs to know which area a click lands on: one outline per object."""
+def areas(objects: list, palette: list, rows: list | None = None) -> list:
+    """What the preview needs to know which area a click lands on: one outline per object.
+    Lettering says so, with its words when they are known, so it can be retyped."""
+    words = {r["row"]: r.get("text") for r in rows or []}
     out = []
     for o in objects:
         polys = polygons_of(shape_of(o))
@@ -122,6 +182,10 @@ def areas(objects: list, palette: list) -> list:
             continue
         p = max(polys, key=lambda q: q.area).simplify(0.2)
         ring = [round(v, 2) for xy in p.exterior.coords for v in xy]
-        out.append({"kind": o["kind"], "hex": hex_of(palette[o["color"]]),
-                    "area": round(float(p.area), 1), "ring": ring})
+        a = {"kind": o["kind"], "hex": hex_of(palette[o["color"]]),
+             "area": round(float(p.area), 1), "ring": ring}
+        if o.get("text_row") is not None:
+            a["text"] = True
+            a["words"] = words.get(o["text_row"]) or ""
+        out.append(a)
     return out
