@@ -15,6 +15,7 @@ Output is a "label map": one small number per pixel saying which color it is (BG
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2
@@ -140,6 +141,16 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         cmap[idx] = np.array(others, np.int32)[near]
         alive.remove(c)
 
+    def fade(c):
+        """Cluster c becomes background (not sewn): transparent, or the background color."""
+        idx = cmap == c
+        if bg_id is not None:
+            cmap[idx] = bg_id
+        else:
+            cmap[idx] = -1
+            fg[idx] = False
+        alive.remove(c)
+
     def closest_pair(ids):
         best = None
         for i in range(len(ids)):
@@ -175,17 +186,38 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         if len(alive) > 1 and c != bg_id and area(c) < TINY_CLUSTER * total:
             dissolve(c)
 
-    # 4. dissolve edge blends: thin clusters whose color is a mix of two other colors
+    # 4. dissolve edge blends: thin clusters whose color is a mix of two other colors. With
+    #    a see-through background the art was drawn over white, so white counts as a color
+    #    an edge can blend into.
+    paper = [] if alpha_w is None else [np.array([100.0, 0.0, 0.0])]
     r = max(1, round(0.2 * ppm), round(1.5 * W / w))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     for c in sorted(alive, key=area):
-        if len(alive) <= 2 or c == bg_id:
+        if len(alive) <= (1 if paper else 2) or c == bg_id:
             continue
         mask = (cmap == c).astype(np.uint8)
         kept = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel).sum()
         if 1.0 - kept / max(1, mask.sum()) > 0.6 and \
-                _is_blend(centers[c], [centers[o] for o in alive if o != c]):
-            dissolve(c)
+                _is_blend(centers[c], [centers[o] for o in alive if o != c] + paper):
+            others = [o for o in alive if o != c]
+            near_color = min(float(np.linalg.norm(centers[c] - centers[o])) for o in others)
+            if paper and float(np.linalg.norm(centers[c] - paper[0])) < near_color:
+                fade(c)            # the soft edge is mostly paper: it isn't sewn
+            else:
+                dissolve(c)        # mostly line: it joins the line, so lines keep their weight
+
+    # 5. faint shading: a pale, nearly grey color covering little of the design, next to the
+    #    background, is shading or a soft edge, not a thread color. Shading is the first
+    #    thing a digitizer drops (deep-dive rule 10), so it becomes background.
+    light_bg = alpha_w is not None or (bg_id is not None and centers[bg_id][0] > 80)
+    if light_bg:
+        for c in sorted(alive, key=area):
+            if c == bg_id or len([o for o in alive if o != bg_id]) <= 1:
+                continue
+            L, a, b = centers[c]
+            darker = any(centers[o][0] < L - 30 for o in alive if o not in (c, bg_id))
+            if L > 65 and math.hypot(a, b) < 15 and area(c) < 0.05 * total and darker:
+                fade(c)
 
     found = {"present": False, "sewn": False}
 
@@ -220,7 +252,7 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         found["sewn"] = bool(mode)
         return inside if mode else None
 
-    # 5. still too many colors? merge the two closest until it fits
+    # 6. still too many colors? merge the two closest until it fits
     room = max_colors - (1 if enclosed_background() is not None else 0)
     squeezed = False               # a color was merged only to keep a slot for the blanks
     while True:

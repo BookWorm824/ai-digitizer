@@ -22,7 +22,10 @@ MM_PER_INCH = 25.4
 RULES: dict = {
     # Shapes and stitch types (see reports/Embroidery digitizing rules.md for sources)
     "min_detail_mm": 1.0,         # smaller than this won't sew
-    "satin_min_mm": 1.2,          # narrowest satin that looks good (Melco 1.2; others 1.0-1.5)
+    "satin_min_mm": 1.6,          # narrower lines are sewn as running stitch, not a skinny
+                                  # satin (A&E: a 4-ply run is the alternative to thin satin;
+                                  # Embroidery Legacy: satin not under 1.5-2 mm)
+    "line_bold_mm": 0.8,          # lines at least this wide get a heavier 4-pass run
     "satin_max_mm": 7.0,          # widest satin on wearables before it snags (Wilcom ~7)
     "satin": True,                # narrow columns are sewn as satin
     "bean_line_mm": 0.3,          # visible detail lines get a bean (triple) run (Goodall)
@@ -109,12 +112,12 @@ def machines() -> list:
 
 
 # How much fill underlay each level means: (edge run?, fill-underlay row spacing in mm).
-UNDERLAY_LEVELS = {                  # Ink/Stitch uses 3x the top spacing (about 1.2 mm)
+UNDERLAY_LEVELS = {
     "none": (False, 0.0),
     "light": (True, 0.0),            # edge run only: stable fabrics like denim
-    "medium": (True, 1.9),
-    "medium-heavy": (True, 1.6),
-    "heavy": (True, 1.3),            # stretchy knits and deep pile
+    "medium": (True, 3.5),           # deep-dive rule 35 (Campbell): perpendicular, 3-4 mm
+    "medium-heavy": (True, 3.0),
+    "heavy": (True, 2.5),            # stretchy knits and deep pile
 }
 
 # The "softer <-> denser" slider: how much further apart or closer the stitch rows sit.

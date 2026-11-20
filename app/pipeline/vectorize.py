@@ -17,6 +17,7 @@ from shapely import affinity
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
+from . import geometry
 from .common import BG, PipelineError, canvas_for, polygons_of, save_debug
 
 
@@ -80,6 +81,15 @@ def run(clean: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
             moved.append(affinity.scale(p, f, f, origin=(0, 0)))
         layer["polys"] = moved
 
+    # Redraw every outline the way a digitizer would: straight runs dead straight, level and
+    # upright lines snapped exactly, corners crisp, curves smooth (geometry.py).
+    axes = [0.0, 90.0]
+    if rules.get("clean_geometry", True):
+        axes = geometry.main_axes([pl for layer in layers
+                                   for pl in geometry.all_pieces(layer["polys"])])
+        for layer in layers:
+            layer["polys"] = geometry.clean_polygons(layer["polys"], axes)
+
     bounds = ((minx - cx) * f, (miny - cy) * f, (maxx - cx) * f, (maxy - cy) * f)
     if debug_dir is not None:
         img, to_px = canvas_for(bounds, 8.0, color=(255, 255, 255))
@@ -92,4 +102,4 @@ def run(clean: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
                 cv2.polylines(img, rings, True, (0, 0, 0), 1, cv2.LINE_AA)
         save_debug(debug_dir, "05_vectorize.png", img)
 
-    return {"layers": layers, "bounds": bounds}
+    return {"layers": layers, "bounds": bounds, "axes": axes}

@@ -51,8 +51,9 @@ def test_a_narrow_bar_becomes_one_satin_column():
     (box(0, 0, 30, 30), ["fill"]),                                    # wide: fill
     (Point(0, 0).buffer(3), ["fill"]),                                # a dot is not a column
     (box(0, 0, 30, 0.7), ["run"]),                                    # thin: running stitch
-    (box(0, 0, 30, 1.0), ["run"]),                                    # under 1.2 mm: bean line
-    (box(0, 0, 30, 1.6), ["satin"]),                                  # a 1.6 mm bar is satin
+    (box(0, 0, 30, 1.0), ["run"]),                                    # 1 mm: a bold run line
+    (box(0, 0, 30, 1.4), ["run"]),                                    # still run, not thin satin
+    (box(0, 0, 30, 2.0), ["satin"]),                                  # a 2 mm bar is satin
     (Point(0, 0).buffer(20).difference(Point(0, 0).buffer(17)), ["satin"]),   # 3 mm ring
 ])
 def test_width_decides_the_stitch_type(shape, kinds):
@@ -79,6 +80,8 @@ def test_satin_can_be_switched_off():
 # ------------------------------------------------------------------------- satin stitching
 
 def _satin(width, rules=RULES):
+    # narrow test bars are forced to satin (normally under 1.6 mm they are running stitch)
+    rules = dict(rules, satin_min_mm=min(rules["satin_min_mm"], width * 0.9))
     obj = classify.run(_vec([box(0, 0, 30, width)]), rules)["objects"][0]
     return obj, stitch.stitch_satin(obj, rules)[0]
 
@@ -147,7 +150,7 @@ def test_fill_gets_an_edge_run_then_underlay_then_top():
 
 
 @pytest.mark.parametrize("fabric, edge, spacing", [
-    ("tshirt", True, 1.3), ("hoodie", True, 1.6), ("polo", True, 1.9), ("denim", True, 0.0)])
+    ("tshirt", True, 2.5), ("hoodie", True, 3.0), ("polo", True, 3.5), ("denim", True, 0.0)])
 def test_fabric_sets_how_much_underlay(fabric, edge, spacing):
     r = config.rules_for(fabric)
     assert r["underlay_edge_run"] is edge and r["underlay_spacing_mm"] == spacing
@@ -488,7 +491,7 @@ def test_satin_edges_follow_the_real_shape():
 
 def test_hairline_serifs_are_dropped_from_small_letters():
     """Rule 5: a serif I at 5 mm is one stem column running the whole height."""
-    I = box(-0.55, -2.5, 0.55, 2.5).union(box(-1.5, -2.5, 1.5, -2.0)).union(box(-1.5, 2.0, 1.5, 2.5))
+    I = box(-0.9, -2.5, 0.9, 2.5).union(box(-1.8, -2.5, 1.8, -2.0)).union(box(-1.8, 2.0, 1.8, 2.5))
     cols = classify.try_satin(I, RULES, drop_hairlines=True)
     assert cols and len(cols) == 1
     assert float(np.linalg.norm(np.diff(cols[0]["center"], axis=0), axis=1).sum()) > 4.3
@@ -525,7 +528,7 @@ def test_each_word_is_sewn_one_way(tmp_path):
     img.save(buf, "PNG")
     r = run_pipeline(buf.getvalue(), tmp_path, "w", debug=False)
     kinds = {a["kind"] for a in r["areas"]}
-    assert len(kinds) == 1, kinds
+    assert len(kinds - {"run"}) == 1, kinds          # fill letters also get an edge run
 
 
 def test_small_letter_counters_stay_open(tmp_path):

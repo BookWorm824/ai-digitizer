@@ -37,7 +37,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 from skimage.morphology import skeletonize
 
-from . import lettering
+from . import geometry, lettering, linenet
 from .common import canvas_for, dist, polygons_of, save_debug
 
 SKEL_PPM = 12.0          # resolution used to find centre lines
@@ -667,6 +667,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     def add_lines(piece, color, stitch_mm=None, min_len=MIN_THIN_LENGTH_MM):
         """Bean-stitch lines along the centre of a thin shape. Returns False if it had none."""
         lines, width = centerlines(piece, min(MIN_RUN_MM, min_len))
+        lines = geometry.clean_lines(lines, vec.get("axes", [0.0, 90.0]))
         if width < NOISE_WIDTH_MM or sum(ln.length for ln in lines) < min_len:
             return False
         for ln in lines:
@@ -677,13 +678,51 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             objects.append(o)
         return True
 
+    def add_edge(poly, color):
+        """A crisp edge on fill lettering: a bean run around the letter, sewn after its fill,
+        which hides the uneven ends of the fill rows (Jeff Fuller: fill letters get an outline
+        sewn with them; deep-dive rule 24)."""
+        for part in polygons_of(poly.buffer(-0.15)):
+            for ring in [part.exterior, *part.interiors]:
+                line = LineString(ring.coords)
+                if line.length >= 2.0:
+                    objects.append({"kind": "run", "color": color, "line": line, "width_mm": 0.6,
+                                    "bean": True, "stitch_mm": 1.8, "edge": True})
+
+    def add_network(piece, color):
+        """Line art: the centre lines as one clean network, straightened and lined up, sewn
+        as one continuous thread with two passes on every line (linenet.py). Returns False
+        if there was nothing worth sewing."""
+        sk = _skeleton(piece, prune_hairlines=False)
+        if sk is None:
+            return False
+        paths, _ends, dt, to_mm = sk
+        on = [dt[y, x] for pth in paths for y, x in pth]
+        width = float(2.0 * np.mean(on) / SKEL_PPM) if on else 0.0
+        if width < NOISE_WIDTH_MM:
+            return False
+        mm = [np.array([to_mm(y, x) for y, x in pth]) for pth in paths if len(pth) >= 2]
+        routes = linenet.network(mm, vec.get("axes", [0.0, 90.0]), spur=rules["min_detail_mm"])
+        routes = [r for r in routes if linenet.length(r) >= MIN_THIN_LENGTH_MM / 2]
+        if not routes:
+            return False
+        # Running-stitch weight by drawn width (research: running_stitch.md): thin lines get
+        # two even passes; lines from 0.8 mm (or any line on pile, where runs sink) get four:
+        # out once and back as a bean, which reads as a bold line without a skinny satin.
+        bold = width >= rules["line_bold_mm"] or rules.get("knockdown", False)
+        for route in routes:
+            line = LineString(np.vstack(route))
+            objects.append({"kind": "run", "color": color, "line": line, "route": route,
+                            "width_mm": width, "bean": False, "bold": bool(bold)})
+        return True
+
     def sew_narrow(part, color):
         """A part that is narrow all over: satin if it is a real column, bean lines if it is
         thin or a web of outlines, otherwise a fill."""
         nonlocal dropped
         w = typical_width(part)
         if w < satin_min or (len(part.interiors) >= NETWORK_HOLES and w < NETWORK_MAX_MM):
-            if add_lines(part, color):
+            if add_network(part, color) or add_lines(part, color):
                 return
             if part.area >= min_area and w >= satin_min * 0.8:
                 add_fill(part, color)
@@ -708,18 +747,13 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             if any(h.contains(blank) for h in hulls):
                 done.add((inside, i))
 
-    def trace_row(row, keys, height):
-        """Sew a row of traced letters one consistent way: satin when (nearly) every letter
-        is a clean set of columns; otherwise small letters become run lettering (a fill
-        across 1 mm strokes looks ragged) and large letters are all filled at one angle."""
-        style = _text_style(height, rules)
+    plans = {}
+
+    def plan_row(row, keys, height):
+        """How a traced row would be sewn: (mode, tried) with mode satin | lines | fill."""
+        if row in plans:
+            return plans[row]
         glyphs = [(c, i, shapes[c][i]) for c, i in keys]
-        if height < rules["text_run_mm"]:
-            # too small for satin: run-stitch lettering, short stitches so curves keep shape
-            for c, i, g in glyphs:
-                if add_lines(g, c, stitch_mm=1.5, min_len=0.8):
-                    done.add((c, i))
-            return
         tried = []
         small = height < SERIF_SMALL_MM
         for c, i, g in glyphs:
@@ -732,13 +766,28 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         passing = [len(t[3]) for t in tried if t[3]]
         if passing and np.mean(passing) > ROW_MEAN_COLUMNS:
             satin_share = 0.0            # heavy serif lettering: a clean fill beats a patchwork
-        angle = 45.0 if row % 2 == 0 else 135.0
         if satin_share >= ROW_SATIN_SHARE:
             mode = "satin"
         elif small:
             mode = "lines"
         else:
             mode = "fill"
+        plans[row] = (mode, tried)
+        return plans[row]
+
+    def trace_row(row, keys, height):
+        """Sew a row of traced letters one consistent way: satin when (nearly) every letter
+        is a clean set of columns; otherwise small letters become run lettering (a fill
+        across 1 mm strokes looks ragged) and large letters are all filled at one angle."""
+        style = _text_style(height, rules)
+        if height < rules["text_run_mm"]:
+            # too small for satin: run-stitch lettering, short stitches so curves keep shape
+            for c, i in keys:
+                if add_lines(shapes[c][i], c, stitch_mm=1.5, min_len=0.8):
+                    done.add((c, i))
+            return
+        mode, tried = plan_row(row, keys, height)
+        angle = 18.0 if row % 2 == 0 else 162.0       # deep-dive rule 38
         for c, i, g, cols in tried:
             if mode == "satin" and cols:
                 add_satin(cols, c, style)
@@ -746,6 +795,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 pass
             else:
                 add_fill(g, c, angle, style)
+                add_edge(g, c)
             done.add((c, i))
 
     # ---- lettering, one row at a time
@@ -766,10 +816,26 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     if letters != "trace" and text:
         for info in row_info:
             h = info["height"]
-            if h >= rules.get("drop_text_mm", 0.0) and (letters == "retype" or h < RETYPE_AUTO_MM):
-                fit = lettering.fit_row(info["glyphs"], text, "block", rules["satin_max_mm"])
-                if fit:
-                    fits[info["row"]] = fit
+            if h < rules.get("drop_text_mm", 0.0):
+                continue
+            style = "block"
+            want = letters == "retype" or h < RETYPE_AUTO_MM
+            if not want and h >= rules["text_run_mm"]:
+                # Bigger words are kept as drawn when they make clean satin. When they would
+                # be filled although their strokes are satin-width, they are retyped instead:
+                # fill lettering is only for strokes over about 10 mm (deep-dive rule 25),
+                # and a satin font beats ragged fill on 2-6 mm strokes.
+                mode, _tried = plan_row(info["row"], row_keys[info["row"]], h)
+                stroke = float(np.median([typical_width(g) for g in info["glyphs"]]))
+                want = mode == "fill" and stroke <= rules["satin_max_mm"]
+            if not want:
+                continue
+            if h >= lettering.SERIF_MIN_MM and lettering.has_serifs(info["glyphs"]):
+                style = "varsity"          # the closest embroidery style to serif lettering
+            fit = lettering.fit_row(info["glyphs"], text, style, rules["satin_max_mm"])
+            if fit:
+                fit["style"] = style
+                fits[info["row"]] = fit
         claimed = []
         for row, fit in sorted(fits.items(), key=lambda kv: -kv[1]["score"]):
             line, a, b = fit["words"]
@@ -777,6 +843,14 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 del fits[row]
             else:
                 claimed.append((line, a, b))
+        # words from one line of text are one piece of lettering: same height, same weight,
+        # sewn the same way, even when they were traced as separate rows
+        by_line = {}
+        for fit in fits.values():
+            by_line.setdefault(fit["words"][0], []).append(fit)
+        for group in by_line.values():
+            if len(group) > 1:
+                lettering.unify([f["placements"] for f in group])
     for info in row_info:
         row, height = info["row"], info["height"]
         keys = row_keys[row]
@@ -788,7 +862,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         if fit:
             info["text"] = fit["text"]
             pls = fit["placements"]
-            objects.extend(lettering.objects(pls, info["color"], rules, "block",
+            objects.extend(lettering.objects(pls, info["color"], rules, fit.get("style", "block"),
                                              lettering.text_style(pls[0].H), group=row, row=row))
             done.update(keys)
             continue

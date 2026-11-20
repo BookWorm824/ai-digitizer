@@ -52,6 +52,8 @@ RUN_BELOW_MM = 4.0           # cap height under which letters are bean runs (rul
 MIN_SATIN_MM = 1.0           # narrowest satin stroke for small letters (rule 5)
 SATIN_MAX_RATIO = 0.2        # a satin stroke wider than this x the cap height closes the
                              # letters up, so 1 mm satin needs letters of at least 5 mm
+SATIN_TEXT_MM = 6.0          # satin lettering starts at this cap height; smaller letters are
+                             # runs (running_stitch.md: 4-6 mm double run or bean)
 LIGHT_MM = 0.85              # lettering traced thinner than this is retyped as a fine line
 LETTER_MAX_RATIO = 0.3       # traced "letters" heavier than this x their height aren't text
 SERIF_MIN_MM = 8.0
@@ -568,7 +570,7 @@ def width_for(H: float, style: str = "block", weight_mm: float | None = None,
     """Stroke width for a cap height: the style's weight (or the original lettering's own
     weight, when retyping), kept between 1 mm and what still reads as a letter."""
     w = weight_mm if weight_mm else STYLES.get(style, STYLES["block"])["weight"] * H
-    lo, hi = max(MIN_SATIN_MM, 0.1 * H), 0.24 * H
+    lo, hi = max(MIN_SATIN_MM, 0.1 * H), SATIN_MAX_RATIO * H
     return float(min(max(w, lo), max(hi, lo)))
 
 
@@ -631,9 +633,11 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
     order. Each carries "seq" so the sequencer sews them letter by letter, stroke by stroke."""
     out = []
     for li, pl in enumerate(pls):
-        strokes = letter_strokes(pl, style)
         run = pl.run or pl.H < max(rules.get("text_run_mm", RUN_BELOW_MM),
-                                   MIN_SATIN_MM / SATIN_MAX_RATIO)
+                                   MIN_SATIN_MM / SATIN_MAX_RATIO, SATIN_TEXT_MM)
+        if run:
+            pl = _as_line(pl)
+        strokes = letter_strokes(pl, style)
         wide = pl.w > rules.get("satin_max_mm", 7.0)
         cols = []
         for si, st in enumerate(strokes):
@@ -649,8 +653,19 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                 line = LineString(pts)
                 if line.length < 0.3:
                     continue
-                o = {"kind": "run", "color": color, "line": line, "width_mm": 0.8, "bean": True,
-                     "stitch_mm": 1.2 if pl.H < 3.0 else 1.5, "seq": seq}
+                # Long strokes get a bean at 2 mm (never shorter: three needle holes close
+                # together cut the fabric); short strokes and tiny letters get a two-pass run
+                # with short stitches, there and back over the same holes.
+                if st["dot"]:
+                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.8,
+                         "bean": True, "stitch_mm": 1.25, "seq": seq}
+                elif line.length >= 3.0 and pl.H >= 4.0:
+                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.8,
+                         "bean": True, "stitch_mm": 2.0, "seq": seq}
+                else:
+                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.6,
+                         "bean": False, "route": [np.asarray(pts), np.asarray(pts)[::-1]],
+                         "seq": seq, "stitch_mm": 1.25}
                 if row is not None:
                     o["text_row"] = row
                 out.append(o)
@@ -677,6 +692,24 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                     o["text_row"] = row
                 out.append(o)
     return out
+
+
+LINE_W_MM = 0.45     # a running-stitch letter's line is about one thread wide
+
+
+def _as_line(pl: Placement) -> Placement:
+    """The same letter for running stitch: its lines are a thread wide, so they reach the
+    full height instead of leaving room for a satin stroke, and it keeps its box."""
+    if pl.w <= LINE_W_MM + 1e-6:
+        return pl
+    q = Placement(pl.ch, 0.0, pl.by, pl.H, LINE_W_MM, pl.k, True)
+    gw = GLYPHS[pl.ch]["width"]
+    if gw > 0.05:
+        inner = gw * pl.s * pl.k + pl.w - LINE_W_MM
+        q.k = float(np.clip(inner / (gw * q.s), 0.6, 1.5))
+    cx = pl.bx + pl.outer_width() / 2
+    q.bx = cx - q.outer_width() / 2
+    return q
 
 
 def text_style(H: float) -> dict:
@@ -715,6 +748,21 @@ def _typical_width(p) -> float:
     return 2.0 * p.area / max(p.length, 1e-9)
 
 
+def stroke_width(p) -> float:
+    """The width of a letter's main strokes: how far it can be shrunk from both sides before
+    almost nothing is left. Unlike 2 x area / outline, serifs and corners don't drag it down."""
+    lo, hi = 0.0, max(0.2, min(p.bounds[2] - p.bounds[0], p.bounds[3] - p.bounds[1]))
+    if p.area <= 0:
+        return 0.0
+    for _ in range(12):
+        mid = (lo + hi) / 2
+        if p.buffer(-mid / 2).area > 0.05 * p.area:
+            lo = mid
+        else:
+            hi = mid
+    return 0.85 * (lo + hi) / 2       # the shrink test lands on the thickest strokes
+
+
 def place_on_glyphs(text: str, glyphs: list, style: str = "block",
                     satin_max: float = 7.0) -> list[Placement] | None:
     """Put each letter of `text` exactly where a traced letter was: same height, baseline,
@@ -723,7 +771,7 @@ def place_on_glyphs(text: str, glyphs: list, style: str = "block",
     chars = letters_of(text)
     if len(chars) != len(glyphs) or not chars:
         return None
-    w0 = float(np.median([_typical_width(g) for g in glyphs]))
+    w0 = float(np.median([stroke_width(g) for g in glyphs]))
     Hs = []
     for ch, g in zip(chars, glyphs):
         m = GLYPHS[ch]
@@ -755,12 +803,50 @@ def place_on_glyphs(text: str, glyphs: list, style: str = "block",
         target = g.bounds[2] - g.bounds[0]
         k = 1.0
         if gw > 0.05:
-            k = float(np.clip((target - w) / (gw * s), 0.7, 1.4))
+            k = float(np.clip((target - w) / (gw * s), 0.75, 1.15))   # keep letters recognisable
         pl = Placement(ch, 0.0, by, H, w, k, light)
         cx = (g.bounds[0] + g.bounds[2]) / 2
         pl.bx = cx - pl.outer_width() / 2
         pls.append(pl)
     return pls
+
+
+def has_serifs(glyphs: list) -> bool:
+    """Do traced letters have serifs? Serif letters are wider at their feet and tops than
+    through the middle of their stems (an I, N or T with little feet)."""
+    ratios = []
+    for g in glyphs:
+        minx, miny, maxx, maxy = g.bounds
+        h = maxy - miny
+        if h <= 0:
+            continue
+
+        def across(y):
+            cut = g.intersection(LineString([(minx - 1, y), (maxx + 1, y)]))
+            return cut.length
+
+        mid = across(miny + 0.5 * h)
+        ends = max(across(miny + 0.06 * h), across(maxy - 0.06 * h))
+        if mid > 1e-6:
+            ratios.append(ends / mid)
+    return bool(ratios) and float(np.median(ratios)) >= 1.5
+
+
+def unify(rows: list[list[Placement]]) -> None:
+    """Give several rows of placed letters (parts of one line of text) one cap height, one
+    stroke weight, one baseline and one way of sewing."""
+    pls = [pl for row in rows for pl in row]
+    if not pls:
+        return
+    H = float(np.median([pl.H for pl in pls]))
+    w = float(np.median([pl.w for pl in pls]))
+    run = sum(pl.run for pl in pls) * 2 >= len(pls)
+    by = float(np.median([pl.by for pl in pls]))
+    for pl in pls:
+        cx = pl.bx + pl.outer_width() / 2
+        pl.H, pl.w, pl.run, pl.by = H, w, run, by
+        pl.s = max(H - w, 0.3 * H)
+        pl.bx = cx - pl.outer_width() / 2
 
 
 def score(pls: list[Placement], glyphs: list, style: str = "block") -> float:
@@ -819,7 +905,7 @@ def fit_box(text: str, glyphs: list, style: str = "block", satin_max: float = 7.
     x1 = max(g.bounds[2] for g in glyphs)
     top = min(g.bounds[1] for g in glyphs)
     bottom = max(g.bounds[3] for g in glyphs)
-    w0 = float(np.median([_typical_width(g) for g in glyphs]))
+    w0 = float(np.median([stroke_width(g) for g in glyphs]))
     chars = [ch for ch in text if ch in GLYPHS and not ch.isspace()]
     y0 = min(GLYPHS[ch]["y0"] for ch in chars)
     y1 = max(GLYPHS[ch]["y1"] for ch in chars)

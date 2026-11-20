@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from shapely.geometry import LineString, Point, Polygon, box
+from shapely.ops import unary_union
 
 import make_images
 from app import config
@@ -148,9 +149,11 @@ def test_thin_line_is_a_run_along_its_middle():
     objs = classify.run(_vec(box(0, 0, 30, 0.7)), RULES)["objects"]
     assert [o["kind"] for o in objs] == ["run"]
     line = objs[0]["line"]
-    assert line.length == pytest.approx(29.3, abs=1.5)
+    # line art is sewn out and back (two even passes, Campbell's redwork tour), so the thread
+    # path covers the drawn line twice
+    assert unary_union(line).length == pytest.approx(29.3, abs=1.5)
+    assert line.length == pytest.approx(2 * unary_union(line).length, rel=0.02)
     assert all(abs(y - 0.35) < 0.2 for _, y in line.coords)
-    assert objs[0]["bean"]                                 # 0.7 mm wide: bold enough for triple
 
 
 def test_shape_with_a_thin_tail_is_split():

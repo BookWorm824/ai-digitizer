@@ -114,7 +114,7 @@ def test_stroke_width_follows_the_research_floors():
     assert L.width_for(20.0) == pytest.approx(2.8)            # 14 % of the cap height
     assert L.width_for(5.0) == pytest.approx(1.0)             # never under 1 mm satin
     assert L.width_for(20.0, "bold") > L.width_for(20.0)
-    assert L.width_for(20.0, weight_mm=9.0) == pytest.approx(0.24 * 20.0)   # stays a letter
+    assert L.width_for(20.0, weight_mm=9.0) == pytest.approx(0.2 * 20.0)    # stays a letter
 
 
 def test_varsity_serifs_only_on_bigger_letters():
@@ -126,7 +126,7 @@ def test_varsity_serifs_only_on_bigger_letters():
 def test_small_letters_become_bean_runs_and_big_ones_satin():
     small = L.objects(L.layout("Hi", 3.0, 0, 0), 0, RULES)
     big = L.objects(L.layout("Hi", 12.0, 0, 0), 0, RULES)
-    assert small and all(o["kind"] == "run" and o["bean"] for o in small)
+    assert small and all(o["kind"] == "run" for o in small)       # run lettering under 6 mm
     assert big and all(o["kind"] == "satin" for o in big)
     # every object knows its place in the sewing order: letter by letter, stroke by stroke
     seqs = [o["seq"] for o in big]
@@ -258,7 +258,7 @@ def test_thin_original_lettering_stays_a_fine_line():
 def test_satin_letters_need_room_for_their_strokes():
     # 1 mm satin closes up letters under 5 mm, so those are sewn as lines
     assert all(o["kind"] == "run" for o in L.objects(L.layout("AB", 4.5, 0, 0), 0, RULES))
-    assert all(o["kind"] == "satin" for o in L.objects(L.layout("AB", 5.5, 0, 0), 0, RULES))
+    assert all(o["kind"] == "satin" for o in L.objects(L.layout("AB", 6.5, 0, 0), 0, RULES))
 
 
 def test_letter_insides_do_not_cost_the_design_a_color(tmp_path):

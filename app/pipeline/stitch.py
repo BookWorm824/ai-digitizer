@@ -32,6 +32,7 @@ from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from .classify import column_rails
+from .linenet import route_points
 from .common import canvas_for, dist, polygons_of, save_debug
 
 STAGGER = (0.0, 0.5, 0.25, 0.75)   # where needle points fall along a row, row after row
@@ -68,8 +69,11 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
         sub = LineString(piece)
         if sub.length < 1e-6:
             continue
-        for step in (rules["run_stitch_mm"], rules["run_stitch_curve_mm"], 1.0):
-            n = max(1, math.ceil(sub.length / step))
+        # Embroidery Legacy: 2.5 mm is the sweet spot, shorter on curves, never under about
+        # 1.25 mm (shorter stitches pile on top of each other and sink)
+        for step in (rules["run_stitch_mm"], rules["run_stitch_curve_mm"], 1.25):
+            # equal stitches no shorter than `step` (rounding the count down, not up)
+            n = max(1, math.floor(sub.length / step + 1e-9))
             pts = [sub.interpolate(sub.length * k / n) for k in range(n + 1)]
             # does any straight stitch stray from the curve it replaces?
             worst = 0.0
@@ -428,14 +432,19 @@ def _travel(p, q, inside, router: _Router, step: float):
     return out[:-1]
 
 
+FILL_ANGLES = (18.0, 162.0)   # deep-dive rule 38: 15-20 deg off level (or its mirror), never
+                              # 45 deg (the fabric stretches on the bias), never upright
+
+
 def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
     """The fill angle that cuts this shape into the fewest separate sections, so it needs the
-    fewest jumps and travel runs (research rule 20, after the Soft Sight patent). Tries the
-    usual angle and the two either side of it; ties keep the usual angle."""
+    fewest jumps and travel runs (the Soft Sight patent), choosing only from angles that
+    stay close to level (Erich Campbell: 15-20 deg off horizontal). `base` is preferred on
+    ties, so neighbouring colors get different angles."""
     if poly.area < 40.0:
         return base
     best = None
-    for k, angle in enumerate((base, base - 45.0, base + 45.0)):
+    for k, angle in enumerate((base,) + tuple(a for a in FILL_ANGLES if a != base)):
         rot = affinity.rotate(poly, -angle, origin=(0, 0))
         n = len(_sections(_rows(rot, max(spacing * 4, 1.2))))
         if best is None or n < best[0]:
@@ -577,7 +586,14 @@ def knockdown(objects: list, rules: dict) -> dict | None:
 def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     stitched = []
     for obj in classified["objects"]:
-        if obj["kind"] == "run":
+        if obj["kind"] == "run" and obj.get("route"):
+            # line art: one thread out along every branch and back over the same holes
+            pts = route_points(obj["route"], run_points,
+                               dict(rules, run_stitch_mm=obj.get("stitch_mm") or rules.get("line_stitch_mm", 2.0)),
+                               bean if obj.get("bold") else None)
+            segments = [pts] if len(pts) > 1 else []
+            shape = obj["line"].buffer(0.4)
+        elif obj["kind"] == "run":
             step = obj.get("stitch_mm") or (rules["bean_stitch_mm"] if obj["bean"] else None)
             pts = run_points(obj["line"], dict(rules, run_stitch_mm=step) if step else rules)
             if obj["bean"]:
@@ -592,7 +608,7 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             # a row of lettering shares one angle so the letters look alike
             angle = obj.get("angle")
             if angle is None:
-                angle = best_fill_angle(obj["poly"], 45.0 if obj["color"] % 2 == 0 else 135.0,
+                angle = best_fill_angle(obj["poly"], FILL_ANGLES[obj["color"] % 2],
                                         rules["fill_spacing_mm"])
             segments = stitch_fill(obj, dict(rules, fill_spacing_mm=rules["fill_spacing_mm"]
                                              * obj.get("spacing_scale", 1.0)), angle)

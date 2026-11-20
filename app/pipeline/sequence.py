@@ -23,7 +23,7 @@ from pathlib import Path
 
 from shapely.geometry import LineString
 from shapely.ops import unary_union
-from shapely.prepared import prep
+from shapely.strtree import STRtree
 
 from .common import dist
 
@@ -88,7 +88,7 @@ def _extent(o: dict) -> tuple:
 
 def _nearest_first(group: list, pos):
     """Objects of one kind, each time going to whichever starts nearest. Returns
-    (thread segments in order, where the needle ends up)."""
+    ([(thread segment, the object's shape)] in order, where the needle ends up)."""
     group = list(group)
     out = []
     while group:
@@ -105,7 +105,7 @@ def _nearest_first(group: list, pos):
         segs = o["segments"]
         if rev:
             segs = [sg[::-1] for sg in segs[::-1]]
-        out.extend(segs)
+        out.extend((sg, o.get("shape")) for sg in segs)
         pos = segs[-1][-1]
     return out, pos
 
@@ -159,8 +159,8 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                 for o in lettered:
                     first, *rest = o["segments"]
                     letter = o["seq"][:2]
-                    segs.append(_NewLetter(first) if letter != last else first)
-                    segs.extend(rest)
+                    segs.append((_NewLetter(first) if letter != last else first, o.get("shape")))
+                    segs.extend((sg, o.get("shape")) for sg in rest)
                     last = letter
                     pos = o["segments"][-1][-1]
                 part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)
@@ -174,30 +174,33 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
 
     blocks = []
     for o in base:
-        raw_blocks.insert(0, [-1, list(o["segments"])])
+        raw_blocks.insert(0, [-1, [(sg, None) for sg in o["segments"]]])
 
-    # Where a connecting thread would be hidden, per color: on that color's own shapes...
-    shapes: dict = {}
-    for o in stitched["objects"]:
-        if o.get("shape") is not None:
-            shapes.setdefault(o["color"], []).append(o["shape"])
-    own = {c: unary_union(g).buffer(0.3) for c, g in shapes.items()}
+    # A connecting thread is hidden only where stitching sewn AFTER it covers it. Thread laid
+    # across stitching that is already sewn shows on top (a line across a finished satin).
+    order_shapes, order_of = [], {}
+    for n, (_color, raw_segments) in enumerate(raw_blocks):
+        for j, (_sg, shape) in enumerate(raw_segments):
+            order_of[(n, j)] = len(order_shapes)
+            order_shapes.append(shape.buffer(0.3) if shape is not None else None)
+    indexed = [(k, g) for k, g in enumerate(order_shapes) if g is not None]
+    tree = STRtree([g for _, g in indexed]) if indexed else None
+
+    def hidden_by_later(line, k):
+        if tree is None:
+            return False
+        near = [indexed[i] for i in tree.query(line)]
+        later = [g for kk, g in near if kk >= k]
+        return bool(later) and unary_union(later).contains(line)
 
     for n, (color, raw_segments) in enumerate(raw_blocks):
-        # ...or under any color that is sewn after this block
-        later = [own[c] for c in {c for c, _ in raw_blocks[n + 1:]} if c in own]
-        hidden = None
-        if color in own or later:
-            hidden = prep(unary_union(([own[color]] if color in own else []) + later))
-
         # join short hops where the thread is hidden, cut the rest
         joined = []
-        for sg in raw_segments:
+        for j, (sg, _shape) in enumerate(raw_segments):
             hop = dist(joined[-1][-1], sg[0]) if joined else None
             short_ok = hop is not None and hop <= ALWAYS_JOIN_MM and not isinstance(sg, _NewLetter)
             ok = hop is not None and hop <= rules["trim_jump_mm"] and (
-                short_ok or hidden is None
-                or hidden.contains(LineString([joined[-1][-1], sg[0]])))
+                short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), order_of[(n, j)]))
             if ok:
                 joined[-1] = joined[-1] + list(sg)
             else:
