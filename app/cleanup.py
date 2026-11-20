@@ -88,6 +88,8 @@ def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str, use_a
         "max_colors": int(rules["max_colors"]),
         "min_text_mm": rules["min_text_mm"],
         "text": info["text"],
+        "smallest_text_pct": (info["ai"] or {}).get("smallest_text_height_pct") or None,
+        "source_height_px": int(img["rgb"].shape[0]),
         "attempts": {},
         "tweaks": 0,
     }
@@ -173,6 +175,12 @@ def run_retry(job_dir: Path, version_id: str) -> dict:
             _save_ctx(job_dir, ctx)
             return _public(v)
     raise PipelineError("That version can't be drawn again. Try typing a change instead.")
+
+
+def stitch_hints(job_dir: Path) -> dict:
+    """What the clean-up learned that the stitch checks can use (text and how small it is)."""
+    ctx = _load_ctx(job_dir)
+    return {"text": ctx.get("text") or [], "smallest_text_pct": ctx.get("smallest_text_pct")}
 
 
 def picture_to_stitch(job_dir: Path, version_id: str,

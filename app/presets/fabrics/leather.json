@@ -1,0 +1,18 @@
+{
+  "id": "leather",
+  "order": 12,
+  "name": "Leather / vinyl",
+  "material": "leather or vinyl",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.6,
+    "pull_comp_mm": 0.2,
+    "underlay_level": "light",
+    "fill_stitch_mm": 4.0,
+    "min_detail_mm": 1.5
+  },
+  "stabilizer": "Cutaway, or self-adhesive cutaway",
+  "notes": [
+    "Needle holes in leather and vinyl are permanent. Test on a scrap first."
+  ]
+}

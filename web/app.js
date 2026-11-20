@@ -34,6 +34,9 @@ const state = {
   stitchedFor: null,        // which version/colors the current stitches were made for
   colors: 6,
   maxColors: 6,
+  sizeIn: null,             // widest side chosen on the Stitches screen (null = screen 1's)
+  density: 0,               // softer (-2) .. denser (+2)
+  moreFabrics: false,
   jobId: null,
   result: null,
   machine: remembered('machine', 'brother'),
@@ -101,10 +104,12 @@ function renderChoices() {
     renderChoices();
   });
   $('#customRow').hidden = state.size !== 'custom';
-  choiceButtons($('#fabrics'), state.options.fabrics, state.fabric, (id) => {
+  const shown = state.options.fabrics.filter((f) => state.moreFabrics || !f.more || f.id === state.fabric);
+  $('#moreFabrics').hidden = state.moreFabrics || !state.options.fabrics.some((f) => f.more);
+  choiceButtons($('#fabrics'), shown, state.fabric, (id) => {
     state.fabric = id;
     // hats have their own size; pick it unless the user already chose a size themselves
-    if (!state.sizeChosenByHand) state.size = id === 'hat' ? 'hat_front' : 'left_chest';
+    if (!state.sizeChosenByHand) state.size = ['hat', 'softhat'].includes(id) ? 'hat_front' : 'left_chest';
     renderChoices();
   });
 }
@@ -185,6 +190,7 @@ function setupScreen1() {
     }
   });
   $('#next1').addEventListener('click', () => { if (state.file) startCleanup(); });
+  $('#moreFabrics').addEventListener('click', () => { state.moreFabrics = true; renderChoices(); });
 }
 
 // ───────────────────────── screen 2: clean up ─────────────────────────
@@ -209,6 +215,8 @@ async function startCleanup() {
   state.cleanup = null;
   state.result = null;
   state.stitchedFor = null;
+  state.sizeIn = null;                 // a new clean-up starts from screen 1's size again
+  state.density = 0;
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
   $('#skipAi').hidden = state.skipAi || !(state.ai && state.ai.provider);
@@ -399,6 +407,8 @@ async function startJob(force) {
   form.append('cleanup_id', state.cleanupId);
   form.append('version', state.version);
   form.append('colors', String(state.colors));
+  form.append('density', String(state.density));
+  if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
     const { id } = await api('api/jobs', { method: 'POST', body: form });
     const job = await waitFor('api/jobs/' + id, token, $('#workLabel'));
@@ -428,7 +438,20 @@ function showResult() {
   $('#lightText').textContent = LIGHT_TEXT[r.check.status];
   const ul = $('#messages');
   ul.innerHTML = '';
-  for (const m of r.check.messages) ul.append(el('li', '', m.text));
+  for (const m of r.check.messages) {
+    const li = el('li', '', m.text);
+    if (m.fixes && m.fixes.length) {
+      const row = el('div', 'fixes');
+      for (const fix of m.fixes) {
+        const b = el('button', '', fix.label);
+        b.type = 'button';
+        b.addEventListener('click', () => applyFix(fix.set));
+        row.append(b);
+      }
+      li.append(row);
+    }
+    ul.append(li);
+  }
 
   const s = r.stats;
   const rows = [
@@ -449,8 +472,20 @@ function showResult() {
   $('#colorCount').textContent = String(s.colors);
   $('#fewer').disabled = s.colors <= 1;
   $('#more').disabled = noMore || s.colors >= state.maxColors;
+  $('#sizeOut').textContent = `${s.size_in} in`;
+  $('#smaller').disabled = s.size_in <= 0.75;
+  $('#bigger').disabled = s.size_in >= 12;
+  $('#density').value = String(r.density);
   draw();
   renderDownload();
+}
+
+// A one-click fix from the checks, or the size / softer-denser controls: change the setting
+// and stitch again.
+function applyFix(set) {
+  if (set.size_in !== undefined) state.sizeIn = Math.min(12, Math.max(0.5, Number(set.size_in)));
+  if (set.density !== undefined) state.density = Math.min(2, Math.max(-2, Number(set.density)));
+  startJob(true);
 }
 
 function shade(hex, amount) {
@@ -461,6 +496,9 @@ function shade(hex, amount) {
 }
 
 // Draw every stitch as a thread-thick line, in sewing order so later thread covers earlier.
+// The picture is drawn several times larger than it is shown (at least 12 pixels per
+// millimetre) and then shrunk smoothly, so each thread stays a clean line instead of a
+// one-pixel scratch.
 function draw() {
   const r = state.result;
   const cv = $('#preview');
@@ -471,35 +509,60 @@ function draw() {
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
   cv.style.height = H + 'px';
-  const ctx = cv.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = state.garment;
-  ctx.fillRect(0, 0, W, H);
 
   const [minx, miny, maxx, maxy] = r.bounds;
-  const pad = 18;
-  const s = Math.min((W - 2 * pad) / (maxx - minx), (H - 2 * pad) / (maxy - miny));
-  const ox = (W - (maxx - minx) * s) / 2 - minx * s;
-  const oy = (H - (maxy - miny) * s) / 2 - miny * s;
-  const lw = Math.max(0.8, 0.38 * s);
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  const pad = 18 * dpr;
+  const shown = Math.min((cv.width - 2 * pad) / (maxx - minx), (cv.height - 2 * pad) / (maxy - miny));
+  const k = Math.max(1, Math.min(12 / shown, 4096 / Math.max(cv.width, cv.height)));
+  const big = document.createElement('canvas');
+  big.width = Math.round(cv.width * k);
+  big.height = Math.round(cv.height * k);
+  const g = big.getContext('2d');
+  g.fillStyle = state.garment;
+  g.fillRect(0, 0, big.width, big.height);
 
+  const s = shown * k;                                   // pixels per millimetre while drawing
+  const ox = (big.width - (maxx - minx) * s) / 2 - minx * s;
+  const oy = (big.height - (maxy - miny) * s) / 2 - miny * s;
+  // Thread is about 0.4 mm but flattens and spreads when sewn, closing the gaps between
+  // rows, so it is drawn a touch wider: otherwise the underlay shows through as a grid.
+  const lw = 0.47 * s;
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
   for (const block of r.blocks) {
-    const dark = shade(block.hex, -0.28);
-    const light = shade(block.hex, 0.35);
+    const dark = shade(block.hex, -0.16);
+    const light = shade(block.hex, 0.22);
     for (const seg of block.segments) {
       for (let i = 0; i < seg.length - 2; i += 80) {          // 40 stitches at a time
         const end = Math.min(seg.length, i + 82);
-        ctx.beginPath();
-        ctx.moveTo(seg[i] * s + ox, seg[i + 1] * s + oy);
-        for (let j = i + 2; j < end; j += 2) ctx.lineTo(seg[j] * s + ox, seg[j + 1] * s + oy);
-        ctx.strokeStyle = dark; ctx.lineWidth = lw + 1; ctx.stroke();
-        ctx.strokeStyle = block.hex; ctx.lineWidth = lw; ctx.stroke();
-        if (lw >= 2.5) { ctx.strokeStyle = light; ctx.lineWidth = Math.max(0.6, lw * 0.25); ctx.stroke(); }
+        g.beginPath();
+        g.moveTo(seg[i] * s + ox, seg[i + 1] * s + oy);
+        for (let j = i + 2; j < end; j += 2) g.lineTo(seg[j] * s + ox, seg[j + 1] * s + oy);
+        g.strokeStyle = dark; g.lineWidth = lw * 1.1; g.stroke();           // soft edge
+        g.strokeStyle = block.hex; g.lineWidth = lw * 0.9; g.stroke();      // the thread
+        g.globalAlpha = 0.5;
+        g.strokeStyle = light; g.lineWidth = lw * 0.28; g.stroke();         // a little sheen
+        g.globalAlpha = 1;
       }
     }
   }
+
+  // shrink in halves for a smooth result, then onto the screen
+  let src = big;
+  while (src.width > cv.width * 2) {
+    const half = document.createElement('canvas');
+    half.width = Math.round(src.width / 2);
+    half.height = Math.round(src.height / 2);
+    const hg = half.getContext('2d');
+    hg.imageSmoothingQuality = 'high';
+    hg.drawImage(src, 0, 0, half.width, half.height);
+    src = half;
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, cv.width, cv.height);
 }
 
 function setupScreen3() {
@@ -524,6 +587,10 @@ function setupScreen3() {
     state.colors = n;
     startJob(true);
   };
+  const quarter = (v) => Math.round(v * 4) / 4;
+  $('#smaller').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in - 0.25) }));
+  $('#bigger').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in + 0.25) }));
+  $('#density').addEventListener('change', (e) => applyFix({ density: Number(e.target.value) }));
   $('#fewer').addEventListener('click', () => changeColors(-1));
   $('#more').addEventListener('click', () => changeColors(1));
   $('#back3').addEventListener('click', () => { state.runToken++; go(2); showCleanup(); });
@@ -563,6 +630,7 @@ function renderDownload() {
     r.check.hoop ? `Hoop: ${r.check.hoop} or larger.` : 'This design does not fit any hoop yet. Go back and choose a smaller size.',
     `Finished size: ${r.stats.width_in} × ${r.stats.height_in} inches.`,
   ];
+  for (const n of r.fabric.notes || []) notes.push(n);
   if (fmt === 'dst') notes.push('DST files do not store colors. Follow the thread order below.');
   const ul = $('#sewNotes');
   ul.innerHTML = '';
@@ -574,7 +642,7 @@ function renderDownload() {
     const li = el('li');
     const chip = el('span', 'chip');
     chip.style.background = c.hex;
-    li.append(chip, el('span', '', `Color ${i + 1}`), el('small', '', `${c.stitches.toLocaleString()} stitches`));
+    li.append(chip, el('span', '', c.label || `Color ${i + 1}`), el('small', '', `${c.stitches.toLocaleString()} stitches`));
     ol.appendChild(li);
   });
 }

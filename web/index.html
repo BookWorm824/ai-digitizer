@@ -44,6 +44,7 @@
 
       <h2>What's it going on?</h2>
       <div id="fabrics" class="choices"></div>
+      <p><button id="moreFabrics" class="link" type="button">More fabrics…</button></p>
 
       <div class="actions">
         <p id="aiLine" class="hint"></p>
@@ -110,6 +111,14 @@
           <ul id="messages" class="messages"></ul>
           <dl id="stats" class="stats"></dl>
           <div class="control">
+            <span>Size</span>
+            <div class="stepper">
+              <button id="smaller" type="button" aria-label="Smaller">−</button>
+              <output id="sizeOut"></output>
+              <button id="bigger" type="button" aria-label="Bigger">+</button>
+            </div>
+          </div>
+          <div class="control">
             <span>Thread colors</span>
             <div class="stepper">
               <button id="fewer" type="button" aria-label="Fewer colors">−</button>
@@ -118,6 +127,13 @@
             </div>
           </div>
           <p class="hint">Fewer colors sew faster.</p>
+          <div class="control slider">
+            <span>Softer</span>
+            <input id="density" type="range" min="-2" max="2" step="1" value="0"
+                   aria-label="How densely to stitch, from softer to denser">
+            <span>Denser</span>
+          </div>
+          <p class="hint">Softer is lighter and more flexible. Denser covers the fabric more.</p>
         </aside>
       </div>
 

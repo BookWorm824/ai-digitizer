@@ -1,0 +1,16 @@
+{
+  "id": "beanie",
+  "order": 15,
+  "name": "Beanie",
+  "material": "rib knit",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.42,
+    "pull_comp_mm": 0.4,
+    "underlay_level": "heavy"
+  },
+  "stabilizer": "Cutaway, plus water-soluble topping on top",
+  "notes": [
+    "Hoop the beanie flat."
+  ]
+}

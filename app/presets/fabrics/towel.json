@@ -1,5 +1,17 @@
 {
-  "id": "towel", "order": 5, "name": "Towel", "material": "terry / fleece",
-  "rules": {"fill_spacing_mm": 0.4, "pull_comp_mm": 0.3},
-  "underlay": "heavy", "stabilizer": "Tearaway + water-soluble topping"
+  "id": "towel",
+  "order": 5,
+  "name": "Towel",
+  "material": "terry or minky",
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.3,
+    "underlay_level": "heavy",
+    "knockdown": true,
+    "min_detail_mm": 1.5
+  },
+  "stabilizer": "Tearaway, plus water-soluble topping on top",
+  "notes": [
+    "The first color is a flattening layer. Sew it in thread that matches the towel."
+  ]
 }

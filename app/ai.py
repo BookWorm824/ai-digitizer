@@ -334,8 +334,10 @@ ANALYSIS_SCHEMA = {
         "text": {"type": "array", "items": {"type": "string"}},
         "color_count": {"type": "integer"},
         "fine_detail_risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "smallest_text_height_pct": {"type": "integer"},
     },
-    "required": ["subject_type", "key_elements", "text", "color_count", "fine_detail_risk"],
+    "required": ["subject_type", "key_elements", "text", "color_count", "fine_detail_risk",
+                 "smallest_text_height_pct"],
     "additionalProperties": False,
 }
 
@@ -360,7 +362,9 @@ ANALYZE_PROMPT = (
     "- color_count: how many distinct flat colors the design really uses, not counting the "
     "background.\n"
     "- fine_detail_risk: low, medium or high: how much of the design is thin lines, tiny "
-    "shapes, gradients or photo detail that thread cannot reproduce.")
+    "shapes, gradients or photo detail that thread cannot reproduce.\n"
+    "- smallest_text_height_pct: the height of a capital letter in the smallest text, as a "
+    "whole-number percentage of the picture's height. 0 if there is no text.")
 
 
 def analyze(png: bytes) -> dict:

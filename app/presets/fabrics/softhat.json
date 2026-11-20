@@ -1,0 +1,18 @@
+{
+  "id": "softhat",
+  "order": 16,
+  "name": "Soft hat",
+  "material": "unstructured cap",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.35,
+    "underlay_level": "medium-heavy",
+    "cap_mode": true
+  },
+  "stabilizer": "Cutaway, or two layers of tearaway",
+  "max_height_mm": 57.0,
+  "notes": [
+    "Sewn from the centre outward and from the bottom up, the way caps need."
+  ]
+}

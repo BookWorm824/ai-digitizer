@@ -1,0 +1,14 @@
+{
+  "id": "delicate",
+  "order": 14,
+  "name": "Silk / satin",
+  "material": "delicate woven",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.5,
+    "pull_comp_mm": 0.2,
+    "underlay_level": "light",
+    "fill_stitch_mm": 3.0
+  },
+  "stabilizer": "Light cutaway"
+}

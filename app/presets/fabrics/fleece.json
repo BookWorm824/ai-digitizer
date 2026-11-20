@@ -1,0 +1,17 @@
+{
+  "id": "fleece",
+  "order": 11,
+  "name": "Fleece",
+  "material": "sweatshirt fleece",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.4,
+    "pull_comp_mm": 0.35,
+    "underlay_level": "heavy",
+    "min_detail_mm": 1.5
+  },
+  "stabilizer": "Cutaway with spray adhesive",
+  "notes": [
+    "On dense designs, lay water-soluble topping over the fleece."
+  ]
+}

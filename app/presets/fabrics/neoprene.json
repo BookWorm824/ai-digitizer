@@ -1,0 +1,13 @@
+{
+  "id": "neoprene",
+  "order": 13,
+  "name": "Neoprene",
+  "material": "neoprene, like koozies",
+  "more": true,
+  "rules": {
+    "fill_spacing_mm": 0.5,
+    "pull_comp_mm": 0.45,
+    "underlay_level": "medium"
+  },
+  "stabilizer": "Heavy cutaway backing"
+}

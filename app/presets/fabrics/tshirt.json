@@ -1,5 +1,13 @@
 {
-  "id": "tshirt", "order": 1, "name": "T-shirt", "material": "knit",
-  "rules": {"fill_spacing_mm": 0.45, "pull_comp_mm": 0.4},
-  "underlay": "heavy", "stabilizer": "Cutaway", "warn_large_fills": true
+  "id": "tshirt",
+  "order": 1,
+  "name": "T-shirt",
+  "material": "knit",
+  "rules": {
+    "fill_spacing_mm": 0.45,
+    "pull_comp_mm": 0.4,
+    "underlay_level": "heavy"
+  },
+  "stabilizer": "Cutaway",
+  "warn_large_fills": true
 }

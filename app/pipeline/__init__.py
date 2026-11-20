@@ -33,12 +33,14 @@ LABELS = {
 def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  fit_w_mm: float = 88.9, fit_h_mm: float = 88.9, fabric_id: str = "tshirt",
                  max_colors: int | None = None, overrides: dict | None = None,
+                 density: int = 0, hints: dict | None = None,
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
     debug_dir = out_dir / "debug" if debug else None
     fabric = config.fabrics().get(fabric_id) or config.fabrics()["tshirt"]
-    rules = config.rules_for(fabric["id"], overrides)
+    density = max(-2, min(2, int(density)))
+    rules = config.rules_for(fabric["id"], overrides, density)
     if max_colors:
         rules["max_colors"] = int(max_colors)
 
@@ -60,9 +62,10 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         raise PipelineError(
             "Everything in this picture is too small to stitch at this size. Try a bigger size.")
     say("sequence")
-    plan = sequence.run(stitched, cleaned["palette"], rules, debug_dir)
+    plan = sequence.run(stitched, cleaned["palette"], rules, classified["order"], debug_dir)
     say("validate")
-    check = validate.run(plan, stitched, classified, fabric, config.hoops(), rules, debug_dir)
+    check = validate.run(plan, stitched, classified, fabric, config.hoops(), rules,
+                         dict(hints or {}, density=density), debug_dir)
     say("export")
     exported = export.run(plan, out_dir, name, debug_dir)
 
@@ -71,7 +74,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
             check["messages"].append({
                 "level": "red",
                 "text": f"The {fmt.upper()} file didn't pass its safety check, so don't sew it. "
-                        "Please try again."})
+                        "Please try again.", "fixes": []})
             check["status"] = "red"
 
     w, h = check["width_mm"], check["height_mm"]
@@ -81,15 +84,20 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
             "width_mm": round(w, 1), "height_mm": round(h, 1),
             "width_in": round(w / config.MM_PER_INCH, 2),
             "height_in": round(h / config.MM_PER_INCH, 2),
-            "stitches": plan["stitch_count"], "colors": len(plan["blocks"]),
+            "stitches": plan["stitch_count"],
+            "colors": len({b["color"] for b in plan["blocks"] if b["color"] != -1}),
+            "size_in": round(max(w, h) / config.MM_PER_INCH, 2),
+            "satin_columns": sum(1 for o in stitched["objects"] if o["kind"] == "satin"),
             "trims": plan["trims"],
             "sew_minutes": max(1, round(plan["stitch_count"] / rules["machine_spm"]
                                         + 0.5 * plan["color_changes"])),
         },
         "check": {"status": check["status"], "messages": check["messages"],
                   "hoop": check["hoop"]["name"] if check["hoop"] else None},
-        "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"]},
-        "colors": [{"hex": hex_of(b["rgb"]),
+        "density": density,
+        "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"],
+                   "notes": fabric.get("notes", [])},
+        "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),
                     "stitches": sum(len(s) for s in b["segments"])} for b in plan["blocks"]],
         "blocks": [{"hex": hex_of(b["rgb"]),
                     "segments": [[round(v, 2) for p in sg for v in p] for sg in b["segments"]]}

@@ -92,7 +92,8 @@ def options():
     return {
         "version": __version__,
         "sizes": config.sizes(),
-        "fabrics": [{"id": f["id"], "name": f["name"]} for f in config.fabrics().values()],
+        "fabrics": [{"id": f["id"], "name": f["name"], "more": bool(f.get("more"))}
+                    for f in config.fabrics().values()],
         "machines": config.machines(),
         "max_colors": config.RULES["max_colors"],
     }
@@ -231,7 +232,8 @@ def cleanup_retry(cid: str, version: str = Form(...)):
 async def create_job(cleanup_id: str | None = Form(None), version: str = Form("local"),
                      colors: int = Form(6), file: UploadFile | None = File(None),
                      size: str = Form("left_chest"), custom_in: float | None = Form(None),
-                     fabric: str = Form("tshirt")):
+                     fabric: str = Form("tshirt"), size_in: float | None = Form(None),
+                     density: int = Form(0)):
     """Digitize either a version chosen on the Clean up screen (cleanup_id + version), or a
     picture uploaded directly (file + size + fabric)."""
     if cleanup_id:
@@ -239,10 +241,11 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         if "result" not in src:
             raise HTTPException(409, "That picture is still being cleaned up.")
         name, fit, fabric = src["name"], src["fit"], src["fabric"]
+        hints = cleanup.stitch_hints(src["dir"])
         get_data = lambda say: cleanup.picture_to_stitch(src["dir"], version, say)  # noqa: E731
     elif file is not None:
         data = await _read_upload(file)
-        name, fit = _safe_name(file.filename), _fit_box(size, custom_in)
+        name, fit, hints = _safe_name(file.filename), _fit_box(size, custom_in), {}
         get_data = lambda say: data  # noqa: E731
     else:
         raise HTTPException(400, "Please choose a picture first.")
@@ -252,12 +255,15 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
     with _lock:
         JOBS[job_id] = job
     colors = int(min(config.RULES["max_colors"], max(1, colors)))
+    if size_in:                     # a size chosen on the Stitches screen: the widest side
+        side = min(12.0, max(0.5, float(size_in))) * config.MM_PER_INCH
+        fit = (side, side)
 
     def work():
         say = lambda label: job.__setitem__("label", label)  # noqa: E731
         result = run_pipeline(get_data(say), config.data_dir() / "jobs" / job_id, name,
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
-                              max_colors=colors, progress=say)
+                              max_colors=colors, density=density, hints=hints, progress=say)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")
         job["result"] = result

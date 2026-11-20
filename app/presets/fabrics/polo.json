@@ -1,5 +1,12 @@
 {
-  "id": "polo", "order": 3, "name": "Polo", "material": "knit",
-  "rules": {"fill_spacing_mm": 0.42, "pull_comp_mm": 0.35},
-  "underlay": "medium", "stabilizer": "No-show mesh cutaway"
+  "id": "polo",
+  "order": 3,
+  "name": "Polo",
+  "material": "pique knit",
+  "rules": {
+    "fill_spacing_mm": 0.42,
+    "pull_comp_mm": 0.35,
+    "underlay_level": "medium"
+  },
+  "stabilizer": "No-show mesh cutaway"
 }

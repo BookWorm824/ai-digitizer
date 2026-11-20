@@ -2,9 +2,15 @@
 
 Turn each classified object into needle points (millimetres).
 
-  * run   -> evenly spaced stitches along a line (shorter on tight curves), optionally tripled
-  * fill  -> back-and-forth rows at an angle (a "tatami" fill), with needle points staggered
-             row to row so they don't line up, on top of a light underlay sewn across them
+  * run    evenly spaced stitches along a line (shorter on tight curves), optionally tripled
+  * satin  stitches zig-zagging across a narrow column, over an underlay chosen by its width
+           (under 2 mm none, 2-4 mm a centre run, wider an edge run plus a loose zig-zag)
+  * fill   back-and-forth rows at an angle (a "tatami" fill) with needle points staggered row
+           to row, over an edge run and a loose fill sewn across it. Rows are lengthened a
+           little at both ends because stitches pull a shape narrower as they tighten.
+
+Underlay always goes down first: it fastens the fabric to the stabilizer so the top stitches
+sit flat. Thread that has to move inside a shape is routed where later stitches will cover it.
 
 This is our own code. Nothing here is copied from Ink/Stitch.
 
@@ -14,21 +20,24 @@ between segments the machine has to jump.
 
 from __future__ import annotations
 
+import heapq
 import math
-from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
 from shapely import affinity
 from shapely.geometry import LineString, Polygon
+from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from .classify import column_rails
 from .common import canvas_for, dist, polygons_of, save_debug
 
 STAGGER = (0.0, 0.5, 0.25, 0.75)   # where needle points fall along a row, row after row
 MIN_ROW_MM = 0.3                   # fill rows shorter than this are skipped
 INSIDE_TOL_MM = 0.15               # how far outside a shape a hidden travel stitch may stray
+UNDERLAY_STITCH_MM = 2.0           # stitch length of underlay runs
 
 
 # ----------------------------------------------------------------------------- running stitch
@@ -85,11 +94,65 @@ def bean(points: list) -> list:
     return out
 
 
+# ------------------------------------------------------------------------------------ satin
+
+def _along(arr: np.ndarray, cum: np.ndarray, s) -> np.ndarray:
+    """Points at distances `s` along a polyline given with its cumulative lengths."""
+    return np.column_stack([np.interp(s, cum, arr[:, 0]), np.interp(s, cum, arr[:, 1])])
+
+
+def _tuples(a: np.ndarray) -> list:
+    return [(float(x), float(y)) for x, y in a]
+
+
+def stitch_satin(obj: dict, rules: dict) -> list:
+    """One satin column: underlay to suit its width, then the zig-zag top, as one segment."""
+    center, half = np.asarray(obj["center"], float), np.asarray(obj["half"], float)
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(center, axis=0), axis=1))])
+    total = float(cum[-1])
+    if total < 0.5:
+        return []
+    width = 2 * float(np.median(half))
+    grow = rules["pull_comp_mm"] / 2.0          # each side; stitches pull the column narrower
+    left, right = column_rails(center, half + grow)
+    inset = np.minimum(0.5, half * 0.35)
+    in_left, in_right = column_rails(center, half - inset)
+
+    def run_along(arr, forward=True):
+        n = max(1, math.ceil(total / UNDERLAY_STITCH_MM))
+        s = np.linspace(0.0, total, n + 1)
+        return _tuples(_along(arr, cum, s if forward else s[::-1]))
+
+    def zigzag(a, b, spacing, forward=True):
+        n = max(1, math.ceil(total / spacing))
+        s = np.linspace(0.0, total, n + 1)
+        mid = np.minimum(s + total / n / 2, total)
+        if not forward:
+            s, mid = s[::-1], np.maximum(s[::-1] - total / n / 2, 0.0)
+        pa, pb = _along(a, cum, s), _along(b, cum, mid)
+        out = np.empty((2 * len(s), 2))
+        out[0::2], out[1::2] = pa, pb
+        return _tuples(out)
+
+    pts: list = []
+    top_forward = True
+    if rules.get("underlay") and width >= 2.0:
+        if width > 4.0:                              # edge run both sides, then a loose zig-zag
+            pts += run_along(in_left, True) + run_along(in_right, False)
+            pts += zigzag(in_left, in_right, 2.0, True)
+        else:                                        # one run down the middle
+            pts += run_along(center, True)
+        top_forward = False                          # sew the top back to where we started
+    pts += zigzag(left, right, rules["fill_spacing_mm"], top_forward)
+    return [pts]
+
+
 # ------------------------------------------------------------------------------------- fill
 
-def _rows(rot: Polygon, spacing: float) -> list:
+def _rows(rot: Polygon, spacing: float, extend: float = 0.0) -> list:
     """Cut a polygon into horizontal rows. Returns [(row_index, y, [(x_start, x_end), ...])].
-    Row positions sit on a fixed grid so the texture is the same in every shape."""
+    Row positions sit on a fixed grid so the texture is the same in every shape. `extend`
+    lengthens every row by that much at both ends (pull compensation)."""
     edges = []
     for ring in [rot.exterior, *rot.interiors]:
         c = np.asarray(ring.coords)[:, :2]
@@ -105,8 +168,15 @@ def _rows(rot: Polygon, spacing: float) -> list:
         pairs = []
         if m.any():
             xs = np.sort(x0[m] + (y - y0[m]) * (x1[m] - x0[m]) / (y1[m] - y0[m]))
-            pairs = [(float(xs[j]), float(xs[j + 1])) for j in range(0, len(xs) - 1, 2)
-                     if xs[j + 1] - xs[j] >= MIN_ROW_MM]
+            for j in range(0, len(xs) - 1, 2):
+                a, b = float(xs[j]), float(xs[j + 1])
+                if b - a < MIN_ROW_MM:
+                    continue
+                a, b = a - extend, b + extend
+                if pairs and a <= pairs[-1][1]:          # lengthened rows met: make them one
+                    pairs[-1] = (pairs[-1][0], b)
+                else:
+                    pairs.append((a, b))
         rows.append((i, y, pairs))
         i += 1
     return rows
@@ -167,50 +237,86 @@ def _entry(sec: list, top_first: bool, left_first: bool) -> tuple:
 
 
 class _Router:
-    """Finds a hidden path between two points that stays inside a shape, for when a straight
-    line would cross a hole or leave the shape. Works on a coarse grid of the shape."""
-
-    CELL = 0.5  # mm
+    """Finds a path between two points that stays inside a shape, for when a straight line
+    would cross a hole or leave the shape. Works on a coarse grid of the shape, and prefers
+    ground that hasn't been filled yet, so the thread it lays is covered by later stitches."""
 
     def __init__(self, shape: Polygon, inside):
         self.shape, self.inside, self.mask = shape, inside, None
+        minx, miny, maxx, maxy = shape.bounds
+        self.cell = max(0.5, max(maxx - minx, maxy - miny) / 220.0)
+        self.minx, self.miny = minx, miny
+        self.any_filled = False
 
     def _cell(self, pt):
-        return (int(round((pt[0] - self.minx) / self.CELL)) + 1,
-                int(round((pt[1] - self.miny) / self.CELL)) + 1)
+        return (int(round((pt[0] - self.minx) / self.cell)) + 1,
+                int(round((pt[1] - self.miny) / self.cell)) + 1)
 
     def _build(self):
-        self.minx, self.miny, maxx, maxy = self.shape.bounds
-        w = int((maxx - self.minx) / self.CELL) + 3
-        h = int((maxy - self.miny) / self.CELL) + 3
+        maxx, maxy = self.shape.bounds[2], self.shape.bounds[3]
+        w = int((maxx - self.minx) / self.cell) + 3
+        h = int((maxy - self.miny) / self.cell) + 3
 
         def px(coords):
             a = np.asarray(coords)[:, :2]
-            return np.round(np.column_stack([(a[:, 0] - self.minx) / self.CELL + 1,
-                                             (a[:, 1] - self.miny) / self.CELL + 1])).astype(np.int32)
+            return np.round(np.column_stack([(a[:, 0] - self.minx) / self.cell + 1,
+                                             (a[:, 1] - self.miny) / self.cell + 1])).astype(np.int32)
 
         self.mask = np.zeros((h, w), np.uint8)
         cv2.fillPoly(self.mask, [px(self.shape.exterior.coords)], 1)
         for ring in self.shape.interiors:
             cv2.fillPoly(self.mask, [px(ring.coords)], 0)
+        self.filled = np.zeros((h, w), np.uint8)
+        # cells within about two cells of the shape's edge: thread laid there is the least
+        # noticeable place to cross ground that is already filled
+        inner = cv2.erode(self.mask, np.ones((3, 3), np.uint8), iterations=2)
+        self.edge = (self.mask == 1) & (inner == 0)
+
+    def mark_filled(self, section: list) -> None:
+        """Remember that these rows (in this router's own frame) are now covered in thread."""
+        if self.mask is None:
+            self._build()
+        h, w = self.mask.shape
+        for _i, y, a, b in section:
+            cy = int(round((y - self.miny) / self.cell)) + 1
+            ca = int(round((a - self.minx) / self.cell)) + 1
+            cb = int(round((b - self.minx) / self.cell)) + 1
+            if 0 <= cy < h:
+                self.filled[cy, max(0, ca):min(w, cb + 1)] = 1
+        self.any_filled = True
 
     def __call__(self, p, q):
         if self.mask is None:
             self._build()
-        mask = self.mask
+        mask, filled, edge = self.mask, self.filled, self.edge
         h, w = mask.shape
         s, t = self._cell(p), self._cell(q)
+        best = {s: 0.0}
         prev = {s: None}
-        queue = deque([s])
-        while queue and t not in prev:
-            c = queue.popleft()
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+        heap = [(0.0, s)]
+        steps = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                 (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414))
+        while heap:
+            d, c = heapq.heappop(heap)
+            if c == t:
+                break
+            if d > best.get(c, 1e18):
+                continue
+            for dx, dy, cost in steps:
                 n = (c[0] + dx, c[1] + dy)
-                if n in prev or not (0 <= n[0] < w and 0 <= n[1] < h):
+                if not (0 <= n[0] < w and 0 <= n[1] < h):
                     continue
-                if mask[n[1], n[0]] or n == t:
+                if not (mask[n[1], n[0]] or n == t):
+                    continue
+                if not filled[n[1], n[0]]:
+                    weight = 1.0                 # will be covered by later stitches
+                else:
+                    weight = 3.0 if edge[n[1], n[0]] else 9.0
+                nd = d + cost * weight
+                if nd < best.get(n, 1e18):
+                    best[n] = nd
                     prev[n] = c
-                    queue.append(n)
+                    heapq.heappush(heap, (nd, n))
         if t not in prev:
             return None
         cells = []
@@ -219,9 +325,13 @@ class _Router:
             cells.append(c)
             c = prev[c]
         cells.reverse()
-        pts = [p] + [((cx - 1) * self.CELL + self.minx, (cy - 1) * self.CELL + self.miny)
+        pts = [p] + [((cx - 1) * self.cell + self.minx, (cy - 1) * self.cell + self.miny)
                      for cx, cy in cells[1:-1]] + [q]
-        # pull the path taut: skip ahead whenever a straight hop stays inside the shape
+        if self.any_filled:
+            # keep to the route that dodges filled ground; just smooth the grid steps
+            return [(float(x), float(y)) for x, y in
+                    LineString(pts).simplify(self.cell * 0.6).coords] if len(pts) > 2 else pts
+        # nothing filled yet: pull the path taut wherever a straight hop stays inside
         out, i = [pts[0]], 0
         while i < len(pts) - 1:
             j = len(pts) - 1
@@ -235,9 +345,10 @@ class _Router:
 def _travel(p, q, inside, router: _Router, step: float):
     """Needle points to walk from p to q hidden inside the shape (not including p or q).
     Returns None when there is no hidden route, meaning the thread must jump."""
-    if dist(p, q) < 0.6:
+    d = dist(p, q)
+    if d < 0.6:
         return []
-    if inside.contains(LineString([p, q])):
+    if (not router.any_filled or d < 3.0) and inside.contains(LineString([p, q])):
         path = [p, q]
     else:
         path = router(p, q)
@@ -252,13 +363,14 @@ def _travel(p, q, inside, router: _Router, step: float):
 
 
 def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float,
-                  start=None, travel_step: float = 2.5) -> list[list[tuple[float, float]]]:
+                  start=None, travel_step: float = 2.5,
+                  extend: float = 0.0) -> list[list[tuple[float, float]]]:
     """Fill a polygon with rows at the given angle. Returns one or more thread segments."""
     rot = affinity.rotate(poly, -angle_deg, origin=(0, 0))
-    sections = _sections(_rows(rot, spacing))
+    sections = _sections(_rows(rot, spacing, extend))
     if not sections:
         return []
-    inside = prep(rot.buffer(INSIDE_TOL_MM))
+    inside = prep(rot.buffer(INSIDE_TOL_MM + extend))
     router = _Router(rot, inside)
     ca, sa = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
     cur = None
@@ -289,6 +401,8 @@ def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float
                 seg.extend(walk)
         seg.extend(pts)
         cur = seg[-1]
+        if todo:
+            router.mark_filled(sections[s])
     segments.append(seg)
     # rotate back
     return [[(x * ca - y * sa, x * sa + y * ca) for x, y in sg] for sg in segments if len(sg) > 1]
@@ -298,6 +412,8 @@ def _append(segments: list, new: list, cover, router: _Router, step: float = 2.5
     """Add new segments after existing ones. Thread is carried across inside the shape (where
     it will be covered) whenever there is a way; otherwise a jump is left."""
     for sg in new:
+        if len(sg) < 2:
+            continue
         if segments:
             walk = _travel(segments[-1][-1], sg[0], cover, router, step)
             if walk is not None:
@@ -307,25 +423,74 @@ def _append(segments: list, new: list, cover, router: _Router, step: float = 2.5
         segments.append(list(sg))
 
 
+def edge_run(poly: Polygon, inset: float, rules: dict) -> list:
+    """A run just inside the edge of a shape (around holes too). It anchors the edge so the
+    fill's row ends make a clean outline."""
+    out = []
+    for part in polygons_of(poly.buffer(-inset)):
+        for ring in [part.exterior, *part.interiors]:
+            line = LineString(ring.coords)
+            if line.length < 3.0:
+                continue
+            n = max(3, math.ceil(line.length / UNDERLAY_STITCH_MM))
+            pts = [line.interpolate(line.length * k / n) for k in range(n + 1)]
+            out.append([(p.x, p.y) for p in pts])
+    return out
+
+
 def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
     poly = obj["poly"]
-    cover = prep(poly.buffer(INSIDE_TOL_MM))
+    extend = rules["pull_comp_mm"] / 2.0
+    cover = prep(poly.buffer(INSIDE_TOL_MM + extend))
     router = _Router(poly, cover)
     segments: list = []
     if rules.get("underlay"):
         inset = poly.buffer(-rules["underlay_inset_mm"])
-        for part in polygons_of(inset):
-            # skip slivers: underlay only helps where the shape is reasonably wide
-            if part.buffer(-rules["underlay_min_width_mm"] / 2).is_empty:
-                continue
-            start = segments[-1][-1] if segments else None
-            under = fill_segments(part, angle_deg + 90.0, rules["underlay_spacing_mm"],
-                                  rules["fill_stitch_mm"], start)
-            _append(segments, under, cover, router)
+        wide_enough = [p for p in polygons_of(inset)
+                       if not p.buffer(-rules["underlay_min_width_mm"] / 2).is_empty]
+        if wide_enough and rules.get("underlay_edge_run", True):
+            _append(segments, edge_run(poly, rules["underlay_inset_mm"], rules), cover, router)
+        if rules.get("underlay_spacing_mm"):
+            for part in wide_enough:
+                start = segments[-1][-1] if segments else None
+                under = fill_segments(part, angle_deg + 90.0, rules["underlay_spacing_mm"],
+                                      rules["fill_stitch_mm"], start)
+                _append(segments, under, cover, router)
     start = segments[-1][-1] if segments else None
-    top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"], rules["fill_stitch_mm"], start)
+    top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"], rules["fill_stitch_mm"],
+                        start, extend=extend)
     _append(segments, top, cover, router)
     return segments
+
+
+def knockdown(objects: list, rules: dict) -> dict | None:
+    """For towels and other deep pile: a very open criss-cross of stitches under the whole
+    design, sewn first in thread that matches the fabric, to flatten the loops so the design
+    doesn't sink into them."""
+    geoms = []
+    for o in objects:
+        if o["kind"] == "fill":
+            geoms.append(o["poly"])
+        elif o["kind"] == "satin":
+            geoms.append(o["outline"])
+        else:
+            geoms.append(o["line"].buffer(0.8))
+    if not geoms:
+        return None
+    area = unary_union(geoms).buffer(4.0).buffer(-1.5).simplify(0.4)
+    segments: list = []
+    spacing = rules.get("knockdown_spacing_mm", 1.5)
+    for part in polygons_of(area):
+        cover = prep(part.buffer(INSIDE_TOL_MM))
+        router = _Router(part, cover)
+        for angle in (45.0, 135.0):
+            start = segments[-1][-1] if segments else None
+            _append(segments, fill_segments(part, angle, spacing, 4.0, start), cover, router)
+        _append(segments, edge_run(part, 0.3, rules), cover, router)
+    if not segments:
+        return None
+    return {"kind": "knockdown", "color": -1, "segments": segments, "reversible": False,
+            "area_mm2": float(area.area)}
 
 
 def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
@@ -336,24 +501,34 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             if obj["bean"]:
                 pts = bean(pts)
             segments = [pts] if len(pts) > 1 else []
+            shape = obj["line"].buffer(0.4)          # the ground the thread itself covers
+        elif obj["kind"] == "satin":
+            segments = stitch_satin(obj, rules)
+            shape = obj["outline"]
         else:
             # neighbouring colors get crossing angles so they don't all pull the same way
             angle = 45.0 if obj["color"] % 2 == 0 else 135.0
             segments = stitch_fill(obj, rules, angle)
+            shape = obj["poly"]
         if segments:
             stitched.append({"kind": obj["kind"], "color": obj["color"], "segments": segments,
-                             "reversible": obj["kind"] == "run",
+                             "reversible": obj["kind"] == "run", "shape": shape,
                              "area_mm2": obj.get("area_mm2", 0.0)})
+    if rules.get("knockdown") and stitched:
+        base = knockdown(classified["objects"], rules)
+        if base:
+            stitched.insert(0, base)
 
     if debug_dir is not None and stitched:
         allpts = np.array([p for o in stitched for sg in o["segments"] for p in sg])
         bounds = (allpts[:, 0].min(), allpts[:, 1].min(), allpts[:, 0].max(), allpts[:, 1].max())
         img, to_px = canvas_for(bounds, 12.0, color=(255, 255, 255))
+        colors = {"fill": (200, 90, 30), "satin": (160, 60, 160), "run": (30, 30, 200),
+                  "knockdown": (170, 170, 170)}
         for o in stitched:
-            col = (200, 90, 30) if o["kind"] == "fill" else (30, 30, 200)
             for sg in o["segments"]:
                 px = to_px(sg).astype(np.int32)
-                cv2.polylines(img, [px], False, col, 1, cv2.LINE_AA)
+                cv2.polylines(img, [px], False, colors[o["kind"]], 1, cv2.LINE_AA)
                 for x, y in px:
                     cv2.circle(img, (int(x), int(y)), 1, (0, 0, 0), -1)
         save_debug(debug_dir, "07_stitch.png", img)
