@@ -54,6 +54,10 @@ SATIN_MAX_RATIO = 0.2        # a satin stroke wider than this x the cap height c
                              # letters up, so 1 mm satin needs letters of at least 5 mm
 SATIN_TEXT_MM = 6.0          # satin lettering starts at this cap height; smaller letters are
                              # runs (running_stitch.md: 4-6 mm double run or bean)
+NARROW_TEXT_MM = 4.0         # from here up to SATIN_TEXT_MM, letters are a narrow satin
+NARROW_MIN_MM = 0.8          # (0.8-1.2 mm): bean letters sink into twill, pique and caps and
+                             # look pale from 3 ft; a narrow satin reads bolder (Embroidery
+                             # Legacy group, members' advice on small left-chest lettering)
 LIGHT_MM = 0.85              # lettering traced thinner than this is retyped as a fine line
 LETTER_MAX_RATIO = 0.3       # traced "letters" heavier than this x their height aren't text
 SERIF_MIN_MM = 8.0
@@ -632,46 +636,25 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
     """Classified objects (satin columns, bean runs or fills) for placed letters, in sewing
     order. Each carries "seq" so the sequencer sews them letter by letter, stroke by stroke."""
     out = []
+    narrow_from = max(rules.get("text_run_mm", RUN_BELOW_MM),
+                      rules.get("text_narrow_satin_mm", NARROW_TEXT_MM))
     for li, pl in enumerate(pls):
-        run = pl.run or pl.H < max(rules.get("text_run_mm", RUN_BELOW_MM),
-                                   MIN_SATIN_MM / SATIN_MAX_RATIO, SATIN_TEXT_MM)
-        if run:
+        satin_from = max(rules.get("text_run_mm", RUN_BELOW_MM),
+                         MIN_SATIN_MM / SATIN_MAX_RATIO, SATIN_TEXT_MM)
+        narrow = not pl.run and narrow_from <= pl.H < satin_from
+        if narrow:
+            pl = _as_narrow(pl)
+        elif pl.run or pl.H < satin_from:
             pl = _as_line(pl)
             out.extend(_run_letter(pl, style, color, group, li, row))
             continue
         strokes = letter_strokes(pl, style)
-        wide = pl.w > rules.get("satin_max_mm", 7.0)
+        # wide satin is split across the column when sewn (stitch.split_long), so letters
+        # stay satin up to twice the longest stitch; only wider strokes become fill
+        wide = pl.w > 2 * rules.get("satin_max_mm", 7.0)
         cols = []
         for si, st in enumerate(strokes):
             seq = (group, li, si)
-            if run:
-                pts = st["pts"]
-                if st["dot"]:
-                    (x0, y0), (x1, y1) = pts
-                    my, a = (y0 + y1) / 2, 0.25
-                    # a small crossed knot, which sews as a round dot (a short dash looks
-                    # like a comma)
-                    pts = [(x0 - a, my - a), (x0 + a, my + a), (x0 + a, my - a), (x0 - a, my + a)]
-                line = LineString(pts)
-                if line.length < 0.3:
-                    continue
-                # Long strokes get a bean at 2 mm (never shorter: three needle holes close
-                # together cut the fabric); short strokes and tiny letters get a two-pass run
-                # with short stitches, there and back over the same holes.
-                if st["dot"]:
-                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.8,
-                         "bean": True, "stitch_mm": 1.25, "seq": seq}
-                elif line.length >= 3.0 and pl.H >= 4.0:
-                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.8,
-                         "bean": True, "stitch_mm": 2.0, "seq": seq}
-                else:
-                    o = {"kind": "run", "color": color, "line": line, "width_mm": 0.6,
-                         "bean": False, "route": [np.asarray(pts), np.asarray(pts)[::-1]],
-                         "seq": seq, "stitch_mm": 1.25}
-                if row is not None:
-                    o["text_row"] = row
-                out.append(o)
-                continue
             col = column(st["pts"], pl.w, st["cut0"], st["cut1"])
             if not col:
                 continue
@@ -697,6 +680,22 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
 
 
 LINE_W_MM = 0.45     # a running-stitch letter's line is about one thread wide
+
+
+def _as_narrow(pl: Placement) -> Placement:
+    """The same letter as a narrow satin (0.8-1.2 mm, about a fifth of the cap height),
+    keeping its box so the spacing of the word doesn't change."""
+    w = float(np.clip(SATIN_MAX_RATIO * pl.H, NARROW_MIN_MM, 1.2))
+    if abs(w - pl.w) < 1e-6:
+        return pl
+    q = Placement(pl.ch, 0.0, pl.by, pl.H, w, pl.k, pl.run)
+    gw = GLYPHS[pl.ch]["width"]
+    if gw > 0.05:
+        inner = gw * pl.s * pl.k + pl.w - w
+        q.k = float(np.clip(inner / (gw * q.s), 0.6, 1.5))
+    cx = pl.bx + pl.outer_width() / 2
+    q.bx = cx - q.outer_width() / 2
+    return q
 
 
 def _as_line(pl: Placement) -> Placement:
@@ -758,7 +757,10 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
     for k, route in enumerate(_letter_tours(lines)):
         o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)), "route": route,
              "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
-             "stitch_mm": 1.25 if pl.H < 4.0 else 1.6, "seq": (group, li, k),
+             # tiny letters need short stitches or their curves turn into corners (a 2 mm
+             # "9" sewn in 1.25 mm stitches looks like ">")
+             "stitch_mm": float(np.clip(0.4 * pl.H, 0.8, 1.25)) if pl.H < 4.0 else 1.6,
+             "seq": (group, li, k),
              "punct": not pl.ch.isalnum()}
         if row is not None:
             o["text_row"] = row
@@ -911,6 +913,39 @@ def unify(rows: list[list[Placement]]) -> None:
         pl.H, pl.w, pl.run, pl.by = H, w, run, by
         pl.s = max(H - w, 0.3 * H)
         pl.bx = cx - pl.outer_width() / 2
+
+
+def overlapping(pls: list[Placement], style: str = "block", gap: float = 0.04) -> bool:
+    """Do neighbouring letters run into each other (less than `gap` x the cap height apart)?
+    It happens when small traced letters merge into one shape and the fitter squeezes two
+    letters into one box."""
+    for a, b in zip(pls, pls[1:]):
+        if abs(a.by - b.by) > 0.3 * a.H:
+            continue
+        if b.bx + extent(b, style)[0] - (a.bx + extent(a, style)[1]) < gap * a.H:
+            return True
+    return False
+
+
+def fit_line(text: str, box: tuple, H: float, w: float, style: str = "block",
+             run: bool = False) -> list[Placement]:
+    """Set a whole line of text evenly across a box (minx, miny, maxx, maxy): the line's
+    cap height and weight, centred on the box, stretched or squeezed (within 0.8-1.25) to
+    its width. Used when small traced letters are too merged to place one by one."""
+    minx, miny, maxx, maxy = box
+    cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
+    pls = layout(text, H, cx, cy, style, w=w)
+    if not pls:
+        return pls
+    lo = pls[0].bx + extent(pls[0], style)[0]
+    hi = pls[-1].bx + extent(pls[-1], style)[1]
+    f = float(np.clip((maxx - minx) / max(hi - lo, 1e-6), 0.8, 1.25))
+    for pl in pls:
+        c = pl.bx + pl.outer_width() / 2
+        pl.k *= f
+        pl.run = run
+        pl.bx = cx + (c - cx) * f - pl.outer_width() / 2
+    return pls
 
 
 def score(pls: list[Placement], glyphs: list, style: str = "block") -> float:

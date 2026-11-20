@@ -31,6 +31,7 @@ RULES: dict = {
     "bean_line_mm": 0.3,          # visible detail lines get a bean (triple) run (Goodall)
     "bean_stitch_mm": 2.0,        # bean stitch length (sources: about 2 mm)
     "text_run_mm": 4.0,           # lettering shorter than this is sewn as run/bean letters
+    "text_narrow_satin_mm": 4.0,  # from here to 6 mm letters are a narrow (0.8-1.2 mm) satin
     "min_text_mm": 6.0,           # smallest cap height that reads cleanly in satin (Hatch, Melco)
     "auto_drop_text_mm": 2.0,     # text under this can't be read in thread: left out unless kept
     # Density and stitch lengths

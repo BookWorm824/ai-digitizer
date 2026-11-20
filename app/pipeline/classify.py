@@ -624,6 +624,87 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
     return out
 
 
+def _cover_text_scraps(objects: list, shapes: dict, done: set, fits: dict) -> None:
+    """Pieces of traced letters that never joined their row (a merged "BI", the dot of a
+    small "i") would be sewn as solid blobs over the retyped words. A leftover shape of the
+    lettering's color that the retyped letters mostly cover is part of that text: skip it."""
+    if not fits:
+        return
+    areas = {}
+    for o in objects:
+        if o.get("text_row") not in fits:
+            continue
+        g = o.get("outline") if o["kind"] == "satin" else o.get("poly")
+        if g is None and o.get("line") is not None:
+            g = o["line"].buffer(0.6)
+        if g is not None:
+            areas.setdefault(o["color"], []).append(g.buffer(0.4))
+    for color, parts in areas.items():
+        cover = unary_union(parts)
+        for i, poly in enumerate(shapes.get(color, [])):
+            if (color, i) in done or poly.area <= 0:
+                continue
+            if poly.intersection(cover).area >= 0.6 * poly.area:
+                done.add((color, i))
+
+
+def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
+    """Small lettering often traces badly: letters merge, a line breaks into several rows and
+    only some of them match a word. When a small row matches words of a known line, the
+    rows of the same color lined up beside it (same height and baseline, close by) are taken
+    as the rest of that line, and the whole line is set evenly across them. Rows whose
+    letters were squeezed into each other are re-set evenly too. Returns the rows taken."""
+    infos = {i["row"]: i for i in row_info}
+    taken: set = set()
+    for row, fit in sorted(fits.items(), key=lambda kv: -kv[1]["score"]):
+        if row in taken:
+            continue
+        info = infos[row]
+        h = info["height"]
+        if h >= RETYPE_AUTO_MM:
+            continue
+        line = fit["words"][0]
+        style = fit.get("style", "block")
+        box = list(unary_union(info["glyphs"]).bounds)
+        cy = (box[1] + box[3]) / 2
+        members = [row]
+        grew = True
+        while grew:
+            grew = False
+            for other in row_info:
+                r2 = other["row"]
+                if r2 in members or r2 in taken or other["color"] != info["color"]:
+                    continue
+                if r2 in fits and fits[r2]["words"][0] != line:
+                    continue
+                if not 0.7 <= other["height"] / max(h, 1e-6) <= 1.4:
+                    continue
+                ob = unary_union(other["glyphs"]).bounds
+                if abs((ob[1] + ob[3]) / 2 - cy) > 0.5 * h:
+                    continue
+                if max(ob[0] - box[2], box[0] - ob[2]) > 3.0 * h:
+                    continue
+                box = [min(box[0], ob[0]), min(box[1], ob[1]),
+                       max(box[2], ob[2]), max(box[3], ob[3])]
+                members.append(r2)
+                grew = True
+        pls = fit["placements"]
+        if len(members) == 1 and not lettering.overlapping(pls, style):
+            continue
+        new_text = text[line] if len(members) > 1 else fit["text"]
+        H = float(np.median([pl.H for pl in pls]))
+        w = float(np.median([pl.w for pl in pls]))
+        run = sum(pl.run for pl in pls) * 2 >= len(pls)
+        fit["placements"] = lettering.fit_line(new_text, tuple(box), H, w, style, run)
+        fit["text"] = new_text
+        if len(members) > 1:
+            fit["words"] = (line, 0, len(text[line].split()))
+        for r2 in members[1:]:
+            fits.pop(r2, None)
+            taken.add(r2)
+    return taken
+
+
 def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         text: list[str] | None = None, letters: str = "auto", plan: dict | None = None) -> dict:
     """Choose how every shape is sewn. `text` is the words known to be in the picture (read
@@ -860,7 +941,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     # "auto" does it where tracing struggles (letters under RETYPE_AUTO_MM, where serifs and
     # fine detail fill in); "retype" does it for every row it can match. Each known word can
     # be claimed by one row only: the best match wins.
-    fits = {}
+    fits, absorbed = {}, set()
     if letters != "trace" and text:
         for info in row_info:
             h = info["height"]
@@ -891,6 +972,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 del fits[row]
             else:
                 claimed.append((line, a, b))
+        absorbed = _whole_lines(fits, row_info, text)
         # words from one line of text are one piece of lettering: same height, same weight,
         # sewn the same way, even when they were traced as separate rows
         by_line = {}
@@ -912,8 +994,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             info["text"] = None
             info["not_text"] = True
             continue
-        if height < rules.get("drop_text_mm", 0.0):
-            done.update(keys)          # the user chose to leave this tiny text out
+        if height < rules.get("drop_text_mm", 0.0) or row in absorbed:
+            done.update(keys)          # left out by choice, or set as part of a whole line
             continue
         start = len(objects)
         fit = fits.get(row)
@@ -927,6 +1009,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         trace_row(row, keys, height)
         for o in objects[start:]:
             o["text_row"] = row
+    _cover_text_scraps(objects, shapes, done, fits)
 
     # ---- everything else
     for color in order:

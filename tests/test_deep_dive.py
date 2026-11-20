@@ -153,3 +153,27 @@ def test_fill_angles_stay_close_to_level():
     for poly in (box(0, 0, 40, 30), box(0, 0, 10, 60)):
         a = stitch.best_fill_angle(poly, stitch.FILL_ANGLES[0], 0.4)
         assert a in stitch.FILL_ANGLES                          # 18 or 162 deg, never 45
+
+
+def test_split_long_staggers_needle_points_across_a_wide_satin():
+    from app.pipeline.stitch import split_long
+    # four crossings of a 10 mm column
+    pts = [(0, 0), (10, 0.4), (0, 0.8), (10, 1.2), (0, 1.6)]
+    out = split_long(pts, 7.0)
+    seg = np.linalg.norm(np.diff(np.asarray(out), axis=0), axis=1)
+    assert seg.max() <= 7.0
+    mids = [x for x, _y in out if 0 < x < 10]
+    assert len(set(round(m, 2) for m in mids)) >= 2               # staggered, not one line
+
+
+def test_light_texture_travel_keeps_to_the_edge():
+    from shapely.geometry import box
+    from shapely.prepared import prep
+    from app.pipeline.stitch import _Router, _travel
+    sq = box(0, 0, 30, 30)
+    r = _Router(sq, prep(sq.buffer(0.15)), light=True)
+    walk = _travel((5, 15), (25, 15), prep(sq.buffer(0.15)), r, 2.0)
+    assert walk                                                    # found a hidden way
+    # it goes round by the edge, not straight across the open middle
+    assert min(min(x, 30 - x, y, 30 - y) for x, y in walk) < 1.5
+    assert not any(10 < x < 20 and 10 < y < 20 for x, y in walk)

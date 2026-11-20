@@ -256,8 +256,13 @@ def test_thin_original_lettering_stays_a_fine_line():
 
 
 def test_satin_letters_need_room_for_their_strokes():
-    # 1 mm satin closes up letters under 5 mm, so those are sewn as lines
-    assert all(o["kind"] == "run" for o in L.objects(L.layout("AB", 4.5, 0, 0), 0, RULES))
+    # under 4 mm letters are sewn as lines; from 4 mm a narrow satin, thin enough that the
+    # letters stay open (both counters of a B still show)
+    assert all(o["kind"] == "run" for o in L.objects(L.layout("AB", 3.5, 0, 0), 0, RULES))
+    narrow = L.objects(L.layout("B", 4.5, 0, 0), 0, RULES)
+    assert all(o["kind"] == "satin" and o["width_mm"] <= 0.95 for o in narrow)
+    b = unary_union([o["outline"] for o in narrow])
+    assert sum(len(g.interiors) for g in getattr(b, "geoms", [b])) == 2
     assert all(o["kind"] == "satin" for o in L.objects(L.layout("AB", 6.5, 0, 0), 0, RULES))
 
 
@@ -278,3 +283,24 @@ def test_the_dot_of_an_i_stays_clear_of_its_stem():
         stem, dot = [L.column(s["pts"], w, s["cut0"], s["cut1"])["outline"]
                      for s in L.letter_strokes(pl)]
         assert stem.distance(dot) >= 0.5 * w
+
+
+def test_mid_size_letters_are_a_narrow_satin_not_a_bean():
+    # 4-6 mm letters: a narrow satin reads bolder than a bean, which sinks into textured fabric
+    mid = L.objects(L.layout("Hi", 5.0, 0, 0), 0, RULES)
+    assert mid and all(o["kind"] == "satin" for o in mid)
+    assert all(0.8 <= o["width_mm"] <= 1.2 for o in mid)
+    # the setting can turn it off again
+    off = L.objects(L.layout("Hi", 5.0, 0, 0), 0, {**RULES, "text_narrow_satin_mm": 6.0})
+    assert off and all(o["kind"] == "run" for o in off)
+
+
+def test_very_large_letters_stay_satin_and_are_split_when_sewn():
+    from app.pipeline import stitch
+    pls = L.layout("I", 60.0, 0, 0, w=9.0)
+    objs = L.objects(pls, 0, RULES)
+    assert objs and all(o["kind"] == "satin" for o in objs)      # not turned into fill
+    segs = stitch.stitch_satin(objs[0], RULES)
+    pts = np.asarray(segs[0])
+    longest = np.linalg.norm(np.diff(pts, axis=0), axis=1).max()
+    assert longest <= RULES["satin_max_mm"]                         # no long loose stitches

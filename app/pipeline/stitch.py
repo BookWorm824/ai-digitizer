@@ -70,8 +70,10 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
         if sub.length < 1e-6:
             continue
         # Embroidery Legacy: 2.5 mm is the sweet spot, shorter on curves, never under about
-        # 1.25 mm (shorter stitches pile on top of each other and sink)
-        for step in (rules["run_stitch_mm"], rules["run_stitch_curve_mm"], 1.25):
+        # 1.25 mm (shorter stitches pile on top of each other and sink). Tiny letters ask for
+        # shorter stitches themselves (tip 48: shorten the run to smooth small objects).
+        base = rules["run_stitch_mm"]
+        for step in (base, min(base, rules["run_stitch_curve_mm"]), min(base, 1.25)):
             # equal stitches no shorter than `step` (rounding the count down, not up)
             n = max(1, math.floor(sub.length / step + 1e-9))
             pts = [sub.interpolate(sub.length * k / n) for k in range(n + 1)]
@@ -214,7 +216,29 @@ def stitch_satin(obj: dict, rules: dict) -> list:
         top_forward = False
     spacing = satin_spacing(width, rules) * obj.get("spacing_scale", 1.0)
     pts += zigzag(left, right, spacing, top_forward, short=True)
+    satin_max = rules.get("satin_max_mm", 7.0)
+    if width + 2 * grow > satin_max:
+        # every crossing of the column (underlay, the step to the top, the top) is split
+        pts = split_long(pts, satin_max)
     return [pts]
+
+
+def split_long(pts: list, max_len: float) -> list:
+    """Auto-split a wide satin (Embroidery Legacy tip 99, Wilcom auto split): a stitch longer
+    than `max_len` is broken by needle points across the column, staggered from row to row
+    like brickwork, so it keeps the satin look without long loose stitches that snag and
+    without a visible line down the middle."""
+    out = [pts[0]]
+    for i, (a, b) in enumerate(zip(pts, pts[1:])):
+        d = dist(a, b)
+        if d > max_len:
+            n = math.ceil(d / (max_len * 0.75))
+            shift = -0.22 if (i // 2) % 2 == 0 else 0.22
+            for k in range(1, n):
+                f = (k + shift) / n
+                out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+        out.append(b)
+    return out
 
 
 # ------------------------------------------------------------------------------------- fill
@@ -311,10 +335,14 @@ def _entry(sec: list, top_first: bool, left_first: bool) -> tuple:
 class _Router:
     """Finds a path between two points that stays inside a shape, for when a straight line
     would cross a hole or leave the shape. Works on a coarse grid of the shape, and prefers
-    ground that hasn't been filled yet, so the thread it lays is covered by later stitches."""
+    ground that hasn't been filled yet, so the thread it lays is covered by later stitches.
+    With `light` (an open, half-density fill such as foliage) no row covers the thread fully,
+    so travel keeps to the shape's edge from the start ("travel on edge": Embroidery Legacy
+    tip 52, travel through the middle shows in light-density fills)."""
 
-    def __init__(self, shape: Polygon, inside):
+    def __init__(self, shape: Polygon, inside, light: bool = False):
         self.shape, self.inside, self.mask = shape, inside, None
+        self.light = light
         minx, miny, maxx, maxy = shape.bounds
         self.cell = max(0.5, max(maxx - minx, maxy - miny) / 220.0)
         self.minx, self.miny = minx, miny
@@ -380,7 +408,9 @@ class _Router:
                     continue
                 if not (mask[n[1], n[0]] or n == t):
                     continue
-                if not filled[n[1], n[0]]:
+                if self.light:
+                    weight = 1.0 if edge[n[1], n[0]] else 6.0
+                elif not filled[n[1], n[0]]:
                     weight = 1.0                 # will be covered by later stitches
                 else:
                     weight = 3.0 if edge[n[1], n[0]] else 9.0
@@ -399,7 +429,7 @@ class _Router:
         cells.reverse()
         pts = [p] + [((cx - 1) * self.cell + self.minx, (cy - 1) * self.cell + self.miny)
                      for cx, cy in cells[1:-1]] + [q]
-        if self.any_filled:
+        if self.any_filled or self.light:
             # keep to the route that dodges filled ground; just smooth the grid steps
             return [(float(x), float(y)) for x, y in
                     LineString(pts).simplify(self.cell * 0.6).coords] if len(pts) > 2 else pts
@@ -420,7 +450,8 @@ def _travel(p, q, inside, router: _Router, step: float):
     d = dist(p, q)
     if d < 0.6:
         return []
-    if (not router.any_filled or d < 3.0) and inside.contains(LineString([p, q])):
+    short = 1.5 if router.light else 3.0
+    if ((not router.any_filled and not router.light) or d < short)             and inside.contains(LineString([p, q])):
         path = [p, q]
     else:
         path = router(p, q)
@@ -466,7 +497,7 @@ def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
 def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float,
                   start=None, travel_step: float = 2.5,
                   extend: float = 0.0, rng=None, jitter: float = 0.0,
-                  ragged: float = 0.0) -> list[list[tuple[float, float]]]:
+                  ragged: float = 0.0, light: bool = False) -> list[list[tuple[float, float]]]:
     """Fill a polygon with rows at the given angle. Returns one or more thread segments.
     With `rng`: random needle placement (`jitter`) and row ends cut back at random by up to
     `ragged` mm, so the fill has a soft, uneven edge (foliage, fur, grass)."""
@@ -480,7 +511,7 @@ def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float
     if not sections:
         return []
     inside = prep(rot.buffer(INSIDE_TOL_MM + extend))
-    router = _Router(rot, inside)
+    router = _Router(rot, inside, light)
     ca, sa = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
     cur = None
     if start is not None:   # rotate the start point into the working frame
@@ -547,7 +578,22 @@ def edge_run(poly: Polygon, inset: float, rules: dict) -> list:
     return out
 
 
+def _per_part(fn, obj: dict, *args) -> list | None:
+    """A shape cut into pieces (an overlap trimmed out of it can leave a sliver beside it):
+    sew each real piece and skip slivers. Returns None for a single polygon."""
+    if obj["poly"].geom_type == "Polygon":
+        return None
+    out: list = []
+    for part in polygons_of(obj["poly"]):
+        if part.area >= 0.5:
+            out += fn(dict(obj, poly=part), *args)
+    return out
+
+
 def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
+    parts = _per_part(stitch_fill, obj, rules, angle_deg)
+    if parts is not None:
+        return parts
     poly = obj["poly"]
     extend = rules["pull_comp_mm"] * 0.5          # fill pulls in about half as much as satin
     cover = prep(poly.buffer(INSIDE_TOL_MM + extend))
@@ -580,6 +626,9 @@ def stitch_texture(obj: dict, rules: dict) -> list:
     half-density layers at different angles, the top one with random needle placement
     (25 %), 4 mm stitches, and a jagged edge (row ends cut back at random by up to 0.6 mm)
     instead of a hard, single-angle silhouette. A light hidden underlay holds it flat."""
+    parts = _per_part(stitch_texture, obj, rules)
+    if parts is not None:
+        return parts
     poly = obj["poly"]
     seed = int(abs(poly.centroid.x * 1000 + poly.centroid.y * 37)) % (2 ** 31)
     rng = np.random.default_rng(seed)
@@ -592,7 +641,8 @@ def stitch_texture(obj: dict, rules: dict) -> list:
     spacing = rules["fill_spacing_mm"] * 2.5 if ink >= 0.6 else min(2.5, rules["fill_spacing_mm"] / ink)
     turns = (0.0, TEXTURE["second_turn"]) if ink >= 0.6 else (0.0,)
     cover = prep(poly.buffer(INSIDE_TOL_MM))
-    router = _Router(poly, cover)
+    light = ink < 0.6
+    router = _Router(poly, cover, light)
     segments: list = []
     if rules.get("underlay") and ink >= 0.6:
         inner = poly.buffer(-0.8)
@@ -608,7 +658,7 @@ def stitch_texture(obj: dict, rules: dict) -> list:
             start = segments[-1][-1] if segments else None
             layer = fill_segments(clump, angle + tilt + turn, spacing, TEXTURE["length"], start,
                                   rng=rng, jitter=TEXTURE["jitter"] if (k or len(turns) == 1) else 0.1,
-                                  ragged=TEXTURE["ragged"])
+                                  ragged=TEXTURE["ragged"], light=light)
             _append(segments, layer, cover, router)
     return segments
 
