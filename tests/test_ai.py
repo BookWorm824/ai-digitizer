@@ -148,7 +148,7 @@ def test_without_ai_the_cleanup_still_gives_a_version(tmp_path, badge):
     r = cleanup.run_cleanup(badge, tmp_path / "job", fit=FIT, fabric_id="tshirt")
     assert [v["id"] for v in r["versions"]] == ["local"] and r["default"] == "local"
     assert not r["ai"]["used"] and r["ai"]["problem"] == "off"
-    assert len(r["versions"][0]["colors"]) == 3
+    assert len(r["versions"][0]["colors"]) == 4          # navy, red, black and the white inside
     assert (tmp_path / "job" / "local.png").exists()
 
 

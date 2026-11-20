@@ -50,7 +50,8 @@ def test_a_narrow_bar_becomes_one_satin_column():
 @pytest.mark.parametrize("shape, kinds", [
     (box(0, 0, 30, 30), ["fill"]),                                    # wide: fill
     (Point(0, 0).buffer(3), ["fill"]),                                # a dot is not a column
-    (box(0, 0, 30, 1.0), ["run"]),                                    # thin: running stitch
+    (box(0, 0, 30, 0.7), ["run"]),                                    # thin: running stitch
+    (box(0, 0, 30, 1.0), ["satin"]),                                  # a 1 mm line is satin
     (Point(0, 0).buffer(20).difference(Point(0, 0).buffer(17)), ["satin"]),   # 3 mm ring
 ])
 def test_width_decides_the_stitch_type(shape, kinds):
@@ -201,7 +202,7 @@ def test_towels_get_a_flattening_layer_first(tmp_path):
     r = run_pipeline((IMAGES / "logo_blocks.png").read_bytes(), tmp_path, "t",
                      fabric_id="towel", debug=False)
     assert r["colors"][0]["label"].startswith("Flattening layer")
-    assert r["stats"]["colors"] == 3                                 # not counted as a color
+    assert r["stats"]["colors"] == 4                                 # not counted as a color
     assert all(c["label"] is None for c in r["colors"][1:])
     assert any("matches the towel" in n for n in r["fabric"]["notes"])
     plain = run_pipeline((IMAGES / "logo_blocks.png").read_bytes(), tmp_path / "p", "t",
@@ -332,7 +333,7 @@ def test_real_patch_style_art_gets_a_satin_border(tmp_path):
 def test_chatgpt_patch_art_sews_with_satin_and_no_short_stitches(tmp_path):
     """A real ChatGPT "Bold" redraw of the sample badge, kept as a test picture."""
     r = run_pipeline((IMAGES / "ai_bold_badge.png").read_bytes(), tmp_path, "bold", debug=False)
-    assert r["stats"]["satin_columns"] >= 3 and r["stats"]["colors"] == 3
+    assert r["stats"]["satin_columns"] >= 3 and r["stats"]["colors"] == 4   # white is sewn
     assert r["files"]["pes"]["ok"] and r["files"]["dst"]["ok"]
     assert not any("short" in m["text"] or "too long" in m["text"] for m in r["check"]["messages"])
 
@@ -386,3 +387,36 @@ def test_thread_may_cross_a_gap_only_if_a_later_color_covers_it():
     covered = sequence.run({"objects": [left, right, patch]}, palette, RULES, [0, 1])
     assert [b["color"] for b in covered["blocks"]] == [0, 1]
     assert len(covered["blocks"][0]["segments"]) == 1                       # hidden later: join
+
+
+def test_white_lettering_inside_a_design_is_sewn_not_left_as_holes(tmp_path):
+    """White letters on a red banner, on a white page: the letters are part of the design."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    img = Image.new("RGB", (1200, 600), "white")
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([60, 120, 1140, 480], radius=40, fill=(200, 20, 30))
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 260)
+    except OSError:
+        pytest.skip("needs the Arial Bold font")
+    d.text((600, 300), "TEST", font=font, fill="white", anchor="mm")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    r = run_pipeline(buf.getvalue(), tmp_path, "t", debug=False)
+    hexes = [c["hex"] for c in r["colors"]]
+    assert len(hexes) == 2 and any(h.startswith("#f") or h == "#ffffff" for h in hexes)
+    assert r["stats"]["satin_columns"] >= 4                     # the letter strokes
+    assert r["files"]["pes"]["ok"]
+
+
+def test_satin_stays_solid_on_the_outside_of_a_tight_curve():
+    ring = Point(0, 0).buffer(4.5).difference(Point(0, 0).buffer(1.5))   # 3 mm wide, tight
+    obj = classify.run(_vec([ring]), RULES)["objects"][0]
+    assert obj["kind"] == "satin"
+    pts = stitch.stitch_satin(obj, dict(RULES, underlay=False))[0]
+    outer = sorted((np.arctan2(y, x) for x, y in pts if np.hypot(x, y) > 3.8))
+    gaps = np.diff(outer) * 4.5                                # arc length between stitch ends
+    assert np.median(gaps) <= RULES["fill_spacing_mm"] * 1.15  # no fanning open
+    reach = [np.hypot(x, y) for x, y in pts if np.hypot(x, y) < 3.0]
+    assert max(reach) - min(reach) > 0.4                       # some stitches stop short inside

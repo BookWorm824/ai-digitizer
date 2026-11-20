@@ -76,13 +76,32 @@ def test_intake_keeps_transparency():
 # ------------------------------------------------------------------------------- 4. clean
 
 @pytest.mark.parametrize("name", ["logo_blocks.png", "logo_blocks.jpg"])
-def test_clean_finds_the_three_real_colors(name):
+def test_clean_finds_the_real_colors(name):
     c = clean.run(intake.run((IMAGES / name).read_bytes()), FIT, FIT, RULES)
     assert c["has_background"]
-    assert len(c["palette"]) == 3                          # no extra edge-blend colors
-    for target in (make_images.NAVY, make_images.GOLD, make_images.RED):
+    assert len(c["palette"]) == 4                          # no extra edge-blend colors
+    for target in (make_images.NAVY, make_images.GOLD, make_images.RED, make_images.WHITE):
         assert any(_near(p, target) for p in c["palette"])
     assert c["labels"][2, 2] == BG                         # the white surround is not sewn
+    h, w = c["labels"].shape
+    assert c["labels"][h // 2, w // 2] != BG               # the white disc inside the ring is
+    assert c["inside"] == {"present": True, "sewn": True}
+
+
+def test_line_art_keeps_its_insides_open():
+    """A circle drawn in outline is not a solid white disc."""
+    c = clean.run(intake.run((IMAGES / "logo_lines.png").read_bytes()), FIT, FIT, RULES)
+    assert len(c["palette"]) == 1 and c["inside"] == {"present": True, "sewn": False}
+    forced = clean.run(intake.run((IMAGES / "logo_lines.png").read_bytes()), FIT, FIT,
+                       dict(RULES, sew_enclosed_background=True))
+    assert len(forced["palette"]) == 2                      # but the user can ask for it
+
+
+def test_enclosed_background_can_be_left_unsewn():
+    rules = dict(RULES, sew_enclosed_background=False)
+    c = clean.run(intake.run((IMAGES / "logo_blocks.png").read_bytes()), FIT, FIT, rules)
+    h, w = c["labels"].shape
+    assert len(c["palette"]) == 3 and c["labels"][h // 2, w // 2] == BG
 
 
 def test_clean_respects_max_colors():
@@ -126,24 +145,27 @@ def test_wide_shape_is_a_fill():
 
 
 def test_thin_line_is_a_run_along_its_middle():
-    objs = classify.run(_vec(box(0, 0, 30, 1.0)), RULES)["objects"]
+    objs = classify.run(_vec(box(0, 0, 30, 0.7)), RULES)["objects"]
     assert [o["kind"] for o in objs] == ["run"]
     line = objs[0]["line"]
-    assert line.length == pytest.approx(29, abs=1.5)
-    assert all(abs(y - 0.5) < 0.2 for _, y in line.coords)
-    assert objs[0]["bean"]                                 # 1 mm wide: bold enough for triple
+    assert line.length == pytest.approx(29.3, abs=1.5)
+    assert all(abs(y - 0.35) < 0.2 for _, y in line.coords)
+    assert objs[0]["bean"]                                 # 0.7 mm wide: bold enough for triple
 
 
 def test_shape_with_a_thin_tail_is_split():
-    shape = box(0, 0, 15, 15).union(box(15, 7, 40, 8))     # square with a 1 mm tail
+    shape = box(0, 0, 15, 15).union(box(15, 7, 40, 7.7))   # square with a 0.7 mm tail
     kinds = sorted(o["kind"] for o in classify.run(_vec(shape), RULES)["objects"])
     assert kinds == ["fill", "run"]
 
 
-def test_line_near_the_width_limit_is_not_chopped_up():
-    objs = classify.run(_vec(Point(0, 0).buffer(30).difference(Point(0, 0).buffer(28.5))),
-                        RULES)["objects"]                  # ring exactly 1.5 mm wide
-    assert len(objs) <= 2 and all(o["kind"] == "run" for o in objs)
+@pytest.mark.parametrize("width", [0.7, 0.9, 1.0, 1.15, 1.5])
+def test_line_near_the_width_limit_is_not_chopped_up(width):
+    """A ring whose width sits around the thin-line limit is sewn one way all the way round."""
+    ring = Point(0, 0).buffer(30).difference(Point(0, 0).buffer(30 - width))
+    objs = classify.run(_vec(ring), RULES)["objects"]
+    assert 1 <= len(objs) <= 2 and len({o["kind"] for o in objs}) == 1
+    assert objs[0]["kind"] == ("run" if width < 0.85 else "satin")
 
 
 def test_too_small_details_are_dropped_and_counted():
@@ -154,7 +176,7 @@ def test_too_small_details_are_dropped_and_counted():
 def test_line_art_becomes_runs_only():
     c = clean.run(intake.run((IMAGES / "logo_lines.png").read_bytes()), FIT, FIT, RULES)
     objs = classify.run(vectorize.run(c, FIT, FIT, RULES), RULES)["objects"]
-    assert objs and all(o["kind"] == "run" or o["area_mm2"] < 4 for o in objs)
+    assert objs and all(o["kind"] in ("run", "satin") for o in objs)   # lines, never fills
 
 
 # ------------------------------------------------------------------------------ 7. stitch

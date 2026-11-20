@@ -30,8 +30,11 @@ from skimage.morphology import skeletonize
 from .common import canvas_for, dist, polygons_of, save_debug
 
 SKEL_PPM = 12.0          # resolution used to find centre lines
-MIN_RUN_MM = 1.5         # centre-line pieces shorter than this are spurs, not lines
-MIN_THIN_WIDTH_MM = 0.2  # slivers thinner than this are tracing noise, not lines
+MIN_RUN_MM = 1.2         # centre-line pieces shorter than this are spurs, not lines
+MIN_THIN_WIDTH_MM = 0.3  # slivers thinner than this are tracing noise, not lines
+MIN_THIN_LENGTH_MM = 3.0 # ...and so are thin bits shorter than this
+LINE_FACTOR = 0.85       # a narrow shape this close to the thin-line width is sewn as satin
+FRINGE_MM = 0.5          # thin bits narrower than this on the edge of a solid shape are noise
 WIDE_FACTOR = 1.15       # a part must reach this many times the thin-line width to count as wide
 MIN_WIDE_AREA_MM2 = 8.0  # smaller wide spots (where two lines cross, say) stay part of the line
 SATIN_STEP_MM = 0.25     # spacing of the sample points along a satin column's centre line
@@ -182,8 +185,20 @@ def _smooth(a: np.ndarray, k: int = 5) -> np.ndarray:
 
 
 def column_outline(center: np.ndarray, half: np.ndarray) -> Polygon:
-    """The area a satin column covers: the band `half` wide on each side of its centre line."""
+    """The area a satin column covers: the band `half` wide on each side of its centre line.
+    A column that closes on itself (a ring, the outline of a letter) covers a band with a
+    hole in the middle, not the whole disc."""
     left, right = column_rails(center, half)
+    if len(center) > 8 and dist(center[0], center[-1]) < 3 * SATIN_STEP_MM:
+        a, b = Polygon(left), Polygon(right)
+        if not a.is_valid:
+            a = a.buffer(0)
+        if not b.is_valid:
+            b = b.buffer(0)
+        outer, inner = (a, b) if a.area >= b.area else (b, a)
+        band = outer.difference(inner)
+        if not band.is_empty:
+            return band
     poly = Polygon(np.vstack([left, right[::-1]]))
     return poly if poly.is_valid else poly.buffer(0)
 
@@ -224,6 +239,7 @@ def columns(piece: Polygon) -> list[dict]:
     for path in _join_paths(kept):
         if len(path) < 4:
             continue
+        free_end = (tuple(path[0]) in ends, tuple(path[-1]) in ends)
         pts = np.array([to_mm(y, x) for y, x in path])
         rad = np.array([dt[y, x] for y, x in path]) / SKEL_PPM
         seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
@@ -238,14 +254,26 @@ def columns(piece: Polygon) -> list[dict]:
         half = _smooth(np.minimum(half, 1.25 * np.median(half)))   # no bulge where arms meet
         closed = dist(center[0], center[-1]) < 2 * SATIN_STEP_MM and cum[-1] > 4.0
         if not closed:
-            # the centre line stops about half a width short of each end: carry it on
+            # The centre line stops about half a width short of a free end: carry it on.
+            # (Not where it stops at a junction: the column it meets covers that.)
             for end in (0, -1):
-                k = min(len(center) - 1, 4)
+                if not free_end[end]:
+                    continue
+                # The last half-width of a centre line tends to hook toward a corner, which
+                # would splay the stitches. Cut it off and carry on straight instead, in the
+                # direction the column was heading just before.
+                cut = int(half[end] / SATIN_STEP_MM)
+                if len(center) > 3 * cut + 6 and cut > 0:
+                    center = center[cut:] if end == 0 else center[:-cut]
+                    half = half[cut:] if end == 0 else half[:-cut]
+                else:
+                    cut = 0
+                k = min(len(center) - 1, max(4, cut))
                 d = center[end] - center[k if end == 0 else -1 - k]
                 n = np.linalg.norm(d)
                 if n < 1e-9:
                     continue
-                steps = int(0.9 * half[end] / SATIN_STEP_MM)
+                steps = cut + int(0.9 * half[end] / SATIN_STEP_MM)
                 extra = np.array([center[end] + d / n * SATIN_STEP_MM * (j + 1)
                                   for j in range(steps)]).reshape(-1, 2)
                 if end == 0:
@@ -293,15 +321,22 @@ def try_satin(piece: Polygon, rules: dict) -> list[dict] | None:
 
 def sewing_order(layers: list, satin_max_mm: float = 7.0) -> list[int]:
     """Colors in the order they are sewn. Colors made mostly of wide areas go first, biggest
-    first, so they form the background. Colors made mostly of narrow shapes (outlines,
-    lettering, borders) go after them, so they land on top."""
+    first, so they form the background. Colors made mostly of narrow shapes go after them,
+    widest first, so lettering lands on the areas and the thinnest outlines land on top of
+    everything."""
     half = satin_max_mm / 2.0
-    area, wide = {}, {}
+    area, wide, width = {}, {}, {}
     for layer in layers:
         c = layer["color"]
         area[c] = sum(p.area for p in layer["polys"])
         wide[c] = sum(p.buffer(-half).buffer(half).area for p in layer["polys"])
-    return sorted(area, key=lambda c: (wide[c] < 0.3 * area[c], -area[c]))
+        edge = sum(p.length for p in layer["polys"])
+        width[c] = 2.0 * area[c] / edge if edge else 0.0     # a strip's width = 2 x area / edge
+    def key(c):
+        if wide[c] >= 0.3 * area[c]:
+            return (0, -area[c])
+        return (1, -width[c])
+    return sorted(area, key=key)
 
 
 def underlap(layers: list, order: list[int], overlap: float) -> dict:
@@ -338,8 +373,26 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
 
     objects, dropped = [], 0
+    def add_satin(cols, color):
+        for c in cols:
+            objects.append({"kind": "satin", "color": color, "center": c["center"],
+                            "half": c["half"], "outline": c["outline"],
+                            "width_mm": 2 * float(np.median(c["half"])),
+                            "area_mm2": float(c["outline"].area)})
+
     for color in order:
         for poly in shapes[color]:
+            # A shape that is narrow all over (an outline, a letter stroke) is sewn one way
+            # along its whole length, so it can't flip between satin and a thin line where
+            # its width wobbles around the limit. Its typical width (2 x area / edge length)
+            # decides which.
+            narrow = poly.buffer(-satin_half).is_empty
+            typical = 2.0 * poly.area / poly.length if poly.length else 0.0
+            if narrow and rules.get("satin", True) and typical >= LINE_FACTOR * rules["thin_line_mm"]:
+                cols = try_satin(poly, rules)
+                if cols:
+                    add_satin(cols, color)
+                    continue
             # "Wide" parts survive being shrunk by half the thin-line width. To stop a line
             # whose width hovers around the limit from flipping between fill and run along
             # its length, a wide part only counts if it is clearly wide somewhere.
@@ -347,13 +400,17 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             seeds = poly.buffer(-half * WIDE_FACTOR)
             wide = [c for c in polygons_of(opened)
                     if not seeds.is_empty and c.intersects(seeds) and c.area >= MIN_WIDE_AREA_MM2]
+            if narrow and typical < LINE_FACTOR * rules["thin_line_mm"]:
+                wide = []                                  # a thin line all the way along
             thin_pieces = polygons_of(poly.difference(unary_union(wide))) if wide else [poly]
             lines_here, thin_used = [], []
             for piece in thin_pieces:
                 if piece.area < 0.15:
                     continue
                 lines, width = centerlines(piece)
-                if width >= MIN_THIN_WIDTH_MM and sum(l.length for l in lines) >= 2.0:
+                if wide and width < FRINGE_MM:
+                    continue        # a hair-thin fringe hanging off a solid shape: tracing noise
+                if width >= MIN_THIN_WIDTH_MM and sum(l.length for l in lines) >= MIN_THIN_LENGTH_MM:
                     thin_used.append(piece)
                     for line in lines:
                         lines_here.append((line, width))
@@ -369,11 +426,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None) -> dict:
                 if rules.get("satin", True) and part.buffer(-satin_half).is_empty:
                     cols = try_satin(part, rules)      # narrow all over: a satin candidate
                 if cols:
-                    for c in cols:
-                        objects.append({"kind": "satin", "color": color, "center": c["center"],
-                                        "half": c["half"], "outline": c["outline"],
-                                        "width_mm": 2 * float(np.median(c["half"])),
-                                        "area_mm2": float(c["outline"].area)})
+                    add_satin(cols, color)
                 else:
                     objects.append({"kind": "fill", "color": color, "poly": part,
                                     "area_mm2": float(part.area)})

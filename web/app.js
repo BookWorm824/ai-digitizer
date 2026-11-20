@@ -36,6 +36,7 @@ const state = {
   maxColors: 6,
   sizeIn: null,             // widest side chosen on the Stitches screen (null = screen 1's)
   density: 0,               // softer (-2) .. denser (+2)
+  inside: 'auto',           // blank areas inside the design: auto | sew | open
   moreFabrics: false,
   jobId: null,
   result: null,
@@ -217,6 +218,7 @@ async function startCleanup() {
   state.stitchedFor = null;
   state.sizeIn = null;                 // a new clean-up starts from screen 1's size again
   state.density = 0;
+  state.inside = 'auto';
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
   $('#skipAi').hidden = state.skipAi || !(state.ai && state.ai.provider);
@@ -408,6 +410,7 @@ async function startJob(force) {
   form.append('version', state.version);
   form.append('colors', String(state.colors));
   form.append('density', String(state.density));
+  form.append('inside', state.inside);
   if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
     const { id } = await api('api/jobs', { method: 'POST', body: form });
@@ -476,6 +479,8 @@ function showResult() {
   $('#smaller').disabled = s.size_in <= 0.75;
   $('#bigger').disabled = s.size_in >= 12;
   $('#density').value = String(r.density);
+  $('#insideRow').hidden = !r.inside.present;
+  $('#insideBox').checked = r.inside.sewn;
   draw();
   renderDownload();
 }
@@ -591,6 +596,10 @@ function setupScreen3() {
   $('#smaller').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in - 0.25) }));
   $('#bigger').addEventListener('click', () => applyFix({ size_in: quarter(state.result.stats.size_in + 0.25) }));
   $('#density').addEventListener('change', (e) => applyFix({ density: Number(e.target.value) }));
+  $('#insideBox').addEventListener('change', (e) => {
+    state.inside = e.target.checked ? 'sew' : 'open';
+    startJob(true);
+  });
   $('#fewer').addEventListener('click', () => changeColors(-1));
   $('#more').addEventListener('click', () => changeColors(1));
   $('#back3').addEventListener('click', () => { state.runToken++; go(2); showCleanup(); });

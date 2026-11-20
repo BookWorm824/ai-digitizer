@@ -33,7 +33,7 @@ LABELS = {
 def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  fit_w_mm: float = 88.9, fit_h_mm: float = 88.9, fabric_id: str = "tshirt",
                  max_colors: int | None = None, overrides: dict | None = None,
-                 density: int = 0, hints: dict | None = None,
+                 density: int = 0, hints: dict | None = None, inside: str = "auto",
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
@@ -43,6 +43,8 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     rules = config.rules_for(fabric["id"], overrides, density)
     if max_colors:
         rules["max_colors"] = int(max_colors)
+    if inside in ("sew", "open"):       # the user's own choice for blank areas inside the design
+        rules["sew_enclosed_background"] = inside == "sew"
 
     def say(stage):
         if progress:
@@ -95,6 +97,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         "check": {"status": check["status"], "messages": check["messages"],
                   "hoop": check["hoop"]["name"] if check["hoop"] else None},
         "density": density,
+        "inside": cleaned["inside"],
         "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"],
                    "notes": fabric.get("notes", [])},
         "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),

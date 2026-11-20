@@ -4,7 +4,10 @@ Reduce the picture to a few flat colors and tidy it so every remaining shape can
   * k-means color reduction in Lab color space
   * merge near-identical colors, dissolve the in-between shades that anti-aliasing leaves
     along edges
-  * find the background (transparent, or the flat color around the border) so it isn't sewn
+  * find the background (transparent, or the flat color around the border) so it isn't sewn.
+    Only the part that reaches the edge of the picture counts: an area of the same color
+    shut inside the design (white lettering on a white page, say) is part of the design and
+    is sewn in that color
   * smooth edges, remove specks and close pinholes smaller than the smallest sewable detail
 
 Output is a "label map": one small number per pixel saying which color it is (BG = not sewn).
@@ -184,10 +187,37 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
                 _is_blend(centers[c], [centers[o] for o in alive if o != c]):
             dissolve(c)
 
+    found = {"present": False, "sewn": False}
+
+    def enclosed_background():
+        """Pixels of the background color that are shut inside the design, if they are to
+        be sewn. Records in `found` whether there are any and what was decided."""
+        if bg_id is None:
+            return None
+        m = (cmap == bg_id).astype(np.uint8)
+        _, cc = cv2.connectedComponents(m, connectivity=4)
+        outside = np.unique(np.concatenate([cc[0], cc[-1], cc[:, 0], cc[:, -1]]))
+        inside = (m == 1) & ~np.isin(cc, outside[outside != 0])
+        if inside.sum() < 4 * (rules["min_detail_mm"] * ppm) ** 2:
+            return None
+        found["present"] = True
+        mode = rules.get("sew_enclosed_background", "auto")
+        if mode == "auto":
+            # Solid artwork (a badge, a logo): the blank areas inside it are meant to be that
+            # color, so sew them. A line drawing: the blanks are just paper, leave them open.
+            design = ((cmap != bg_id) & fg).astype(np.uint8)
+            r_mm = max(1, round(1.0 * ppm))
+            core = cv2.erode(design, cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * r_mm + 1, 2 * r_mm + 1)))
+            mode = core.sum() >= 0.2 * max(1, design.sum())
+        found["sewn"] = bool(mode)
+        return inside if mode else None
+
     # 5. still too many colors? merge the two closest until it fits
+    room = max_colors - (1 if enclosed_background() is not None else 0)
     while True:
         sewn = [c for c in alive if c != bg_id]
-        if len(sewn) <= max_colors:
+        if len(sewn) <= max(1, room):
             break
         d, a, b = closest_pair(sewn)
         if area(a) < area(b):
@@ -203,6 +233,10 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
     labels = np.full((H, W), BG, np.uint8)
     for i, c in enumerate(sewn):
         labels[cmap == c] = i
+    inside = enclosed_background()
+    if inside is not None:
+        labels[inside] = len(sewn)          # its own color: the background color, but sewn
+        sewn.append(bg_id)
 
     labels = _smooth(labels, max(0.8, 0.12 * ppm))
     min_area_px = 0.8 * (rules["min_detail_mm"] * ppm) ** 2
@@ -226,7 +260,8 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         palette.append(tuple(int(v) for v in np.median(rgb_w[src], axis=0)))
 
     result = {"labels": out, "palette": palette, "ppm": float(ppm),
-              "has_background": bool(alpha_w is not None or bg_id is not None)}
+              "has_background": bool(alpha_w is not None or bg_id is not None),
+              "inside": dict(found)}
     if debug_dir is not None:
         dbg = render(result, checker=True)
         save_debug(debug_dir, "04_clean.png", dbg[:, :, ::-1])

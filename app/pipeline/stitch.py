@@ -68,7 +68,7 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
         sub = LineString(piece)
         if sub.length < 1e-6:
             continue
-        for step in (rules["run_stitch_mm"], rules["run_stitch_curve_mm"]):
+        for step in (rules["run_stitch_mm"], rules["run_stitch_curve_mm"], 1.0):
             n = max(1, math.ceil(sub.length / step))
             pts = [sub.interpolate(sub.length * k / n) for k in range(n + 1)]
             # does any straight stitch stray from the curve it replaces?
@@ -78,7 +78,7 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
                 mx = (pts[k].x + pts[k + 1].x) / 2
                 my = (pts[k].y + pts[k + 1].y) / 2
                 worst = max(worst, math.hypot(mid_on_path.x - mx, mid_on_path.y - my))
-            if worst <= 0.25:
+            if worst <= 0.12:       # stitches hug the curve: no visible flat spots
                 break
         out.extend((p.x, p.y) for p in pts[1:])
     return out
@@ -113,7 +113,9 @@ def stitch_satin(obj: dict, rules: dict) -> list:
     if total < 0.5:
         return []
     width = 2 * float(np.median(half))
-    grow = rules["pull_comp_mm"] / 2.0          # each side; stitches pull the column narrower
+    # Each side is widened because stitches pull a column narrower. A very narrow column
+    # gets less, or a 1 mm outline would come out half as wide again.
+    grow = min(rules["pull_comp_mm"] / 2.0, 0.03 + 0.12 * width)
     left, right = column_rails(center, half + grow)
     inset = np.minimum(0.5, half * 0.35)
     in_left, in_right = column_rails(center, half - inset)
@@ -123,14 +125,33 @@ def stitch_satin(obj: dict, rules: dict) -> list:
         s = np.linspace(0.0, total, n + 1)
         return _tuples(_along(arr, cum, s if forward else s[::-1]))
 
-    def zigzag(a, b, spacing, forward=True):
-        n = max(1, math.ceil(total / spacing))
-        s = np.linspace(0.0, total, n + 1)
-        mid = np.minimum(s + total / n / 2, total)
+    def zigzag(a, b, spacing, forward=True, short=False):
+        """Stitches crossing from rail a to rail b and back. They are spaced by whichever
+        rail is moving faster, so on a curve the outside edge stays solid instead of fanning
+        open. With `short`, every other stitch stops short on the crowded inside of a tight
+        curve, so thread doesn't pile up there."""
+        da = np.linalg.norm(np.diff(a, axis=0), axis=1)
+        db = np.linalg.norm(np.diff(b, axis=0), axis=1)
+        step = np.maximum(np.maximum(da, db), 1e-9)
+        cu = np.concatenate([[0.0], np.cumsum(step)])
+        span = float(cu[-1])
+        n = max(1, math.ceil(span / spacing))
+        u = np.linspace(0.0, span, n + 1)
+        mid = np.minimum(u + span / n / 2, span)
         if not forward:
-            s, mid = s[::-1], np.maximum(s[::-1] - total / n / 2, 0.0)
-        pa, pb = _along(a, cum, s), _along(b, cum, mid)
-        out = np.empty((2 * len(s), 2))
+            u = u[::-1]
+            mid = np.maximum(u - span / n / 2, 0.0)
+        pa, pb = _along(a, cu, u), _along(b, cu, mid)
+        if short and len(da) > 2:
+            where = (cu[:-1] + cu[1:]) / 2
+            crowd_a = np.interp(u, where, da / step)       # near 0 = a is the inside of a curve
+            crowd_b = np.interp(mid, where, db / step)
+            idx = np.arange(len(u))
+            pull_a = (crowd_a < 0.5) & (idx % 2 == 1)
+            pull_b = (crowd_b < 0.5) & (idx % 2 == 0)
+            pa[pull_a] += 0.35 * (pb[pull_a] - pa[pull_a])
+            pb[pull_b] += 0.35 * (pa[pull_b] - pb[pull_b])
+        out = np.empty((2 * len(u), 2))
         out[0::2], out[1::2] = pa, pb
         return _tuples(out)
 
@@ -143,7 +164,7 @@ def stitch_satin(obj: dict, rules: dict) -> list:
         else:                                        # one run down the middle
             pts += run_along(center, True)
         top_forward = False                          # sew the top back to where we started
-    pts += zigzag(left, right, rules["fill_spacing_mm"], top_forward)
+    pts += zigzag(left, right, rules["fill_spacing_mm"], top_forward, short=True)
     return [pts]
 
 

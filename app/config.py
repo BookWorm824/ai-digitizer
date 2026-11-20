@@ -21,7 +21,10 @@ MM_PER_INCH = 25.4
 # Starting values from the "Digitizing rules" table in BRIEF.md. All lengths in millimetres.
 RULES: dict = {
     "min_detail_mm": 1.0,         # smaller than this won't sew
-    "thin_line_mm": 1.5,          # narrower than this becomes a running stitch
+    # Narrower than this becomes a running stitch. The brief's table says 1.5 mm, but at
+    # 1.5 a 1 mm outline around lettering is sewn as a single thin line and looks spindly;
+    # satin sews cleanly down to about 1 mm, so that is the limit used.
+    "thin_line_mm": 1.0,
     "satin": True,                # narrow columns are sewn as satin
     "satin_max_mm": 7.0,          # wider than this is a fill (wide satins snag and loop)
     "bean_line_mm": 0.6,          # thin lines at least this wide get a triple (bean) run
@@ -36,6 +39,9 @@ RULES: dict = {
     "overlap_mm": 0.4,            # how far a color reaches under the colors sewn after it
     "trim_jump_mm": 3.0,          # jumps longer than this get a trim
     "max_colors": 6,
+    # Blank areas (background color) shut inside the design: True = sew them in that color,
+    # False = leave them open, "auto" = sew them for solid artwork, leave them for line art.
+    "sew_enclosed_background": "auto",
     "min_text_mm": 5.0,           # smallest capital-letter height that stays readable
     "hoop_margin_mm": 5.0,
     "underlay": True,             # master switch for underlay

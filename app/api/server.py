@@ -233,7 +233,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                      colors: int = Form(6), file: UploadFile | None = File(None),
                      size: str = Form("left_chest"), custom_in: float | None = Form(None),
                      fabric: str = Form("tshirt"), size_in: float | None = Form(None),
-                     density: int = Form(0)):
+                     density: int = Form(0), inside: str = Form("auto")):
     """Digitize either a version chosen on the Clean up screen (cleanup_id + version), or a
     picture uploaded directly (file + size + fabric)."""
     if cleanup_id:
@@ -263,7 +263,8 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         say = lambda label: job.__setitem__("label", label)  # noqa: E731
         result = run_pipeline(get_data(say), config.data_dir() / "jobs" / job_id, name,
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
-                              max_colors=colors, density=density, hints=hints, progress=say)
+                              max_colors=colors, density=density, hints=hints, inside=inside,
+                              progress=say)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")
         job["result"] = result
