@@ -24,22 +24,31 @@ from PIL import Image
 
 from .. import ai
 
+# The dials follow what professional digitizers ask of artwork before they stitch it
+# (reports/Embroidery digitizing rules.md): lines at least 1.2 mm (narrower can't be satin),
+# details at least 1.5-2 mm (Melco: anything under 2 mm needs changing), gaps at least 1 mm,
+# busy line work turned into simple shapes, and small lettering without hairline serifs.
 VARIANTS = [
     {"id": "faithful", "name": "Faithful", "blurb": "Closest to your picture",
-     "colors": lambda n: n, "line_mm": 1.0, "detail_mm": 1.0,
+     "colors": lambda n: n, "line_mm": 1.2, "detail_mm": 1.5,
      "extra": "Stay as close to the original as these rules allow."},
     {"id": "simplified", "name": "Simplified", "blurb": "Fewer colors and details",
-     "colors": lambda n: max(2, min(n - 2, 4)), "line_mm": 1.5, "detail_mm": 1.5,
-     "extra": "Simplify: merge small shapes together and leave out minor details."},
+     "colors": lambda n: max(2, min(n - 2, 4)), "line_mm": 1.5, "detail_mm": 2.0,
+     "extra": "Simplify: merge small shapes together, leave out minor details, and use bold, "
+              "even-stroke letters without thin serifs."},
     {"id": "bold", "name": "Bold", "blurb": "Thick outlines, like a patch",
-     "colors": lambda n: max(2, min(n - 1, 5)), "line_mm": 2.0, "detail_mm": 1.5,
-     "extra": "Patch style: a thick dark outline around every shape and around the whole design."},
+     "colors": lambda n: max(2, min(n - 1, 5)), "line_mm": 2.0, "detail_mm": 2.0,
+     "extra": "Patch style: a thick dark outline around every shape and around the whole "
+              "design, and bold, even-stroke letters without thin serifs."},
 ]
 
 RULES_TEXT = ("Rules: flat solid colors only, no gradients, shadows, textures or photo detail.\n"
-              "Maximum {n_colors} colors. Bold clean outlines at least {min_line_mm:g} mm thick "
-              "at final size.\n"
-              "Remove any detail smaller than {min_detail_mm:g} mm at final size.\n"
+              "Maximum {n_colors} colors. Every line and outline at least {min_line_mm:g} mm "
+              "thick at final size; leave out outlines that would be thinner.\n"
+              "Remove any detail smaller than {min_detail_mm:g} mm at final size. Turn fine "
+              "hatching, crosshatching, leaf and grass scribbles and tiny repeated details "
+              "(window panes, bricks) into a few simple solid shapes.\n"
+              "Leave at least 1 mm of space between separate shapes and inside letters.\n"
               "{text_rule}\n"
               "Plain white background. Keep the subject, pose and layout recognizable. Center it.")
 

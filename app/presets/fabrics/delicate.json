@@ -8,7 +8,7 @@
     "fill_spacing_mm": 0.5,
     "pull_comp_mm": 0.2,
     "underlay_level": "light",
-    "fill_stitch_mm": 3.0
+    "fill_stitch_mm": 3.5
   },
   "stabilizer": "Light cutaway"
 }

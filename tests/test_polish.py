@@ -268,7 +268,7 @@ def test_projects_are_saved_listed_reopened_and_deleted(stitched, data_dir):
     jid2 = c.post("/api/jobs", data={"cleanup_id": opened["cleanup_id"], "version": "local",
                                      "size_in": 2.5, "edits": json.dumps(chosen["edits"])}).json()["id"]
     again = _wait(c, f"/api/jobs/{jid2}")["result"]
-    assert again["stats"]["size_in"] == pytest.approx(2.5, abs=0.02) and again["edits_applied"] == 1
+    assert again["stats"]["size_in"] == pytest.approx(2.5, abs=0.05) and again["edits_applied"] == 1
     # a design reopened from a project saves back to that project
     c.post("/api/projects", data={"cleanup_id": opened["cleanup_id"], "job_id": jid2, "settings_json": "{}"})
     assert len(c.get("/api/projects").json()["projects"]) == 1

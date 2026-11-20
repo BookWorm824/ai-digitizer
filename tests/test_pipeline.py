@@ -126,7 +126,7 @@ def test_vectorize_scales_to_the_requested_size():
     c = clean.run(intake.run((IMAGES / "logo_blocks.png").read_bytes()), FIT, FIT, RULES)
     v = vectorize.run(c, FIT, FIT, RULES)
     minx, miny, maxx, maxy = v["bounds"]
-    assert maxx - minx == pytest.approx(FIT - RULES["pull_comp_mm"], abs=0.05)
+    assert maxx - minx == pytest.approx(FIT - 2 * RULES["pull_comp_mm"], abs=0.05)
     assert maxy - miny <= FIT
     assert (minx + maxx) / 2 == pytest.approx(0, abs=0.01)   # centred
     ring = [p for layer in v["layers"] for p in layer["polys"] if p.interiors]
@@ -159,13 +159,13 @@ def test_shape_with_a_thin_tail_is_split():
     assert kinds == ["fill", "run"]
 
 
-@pytest.mark.parametrize("width", [0.7, 0.9, 1.0, 1.15, 1.5])
+@pytest.mark.parametrize("width", [0.7, 1.0, 1.5, 2.0])
 def test_line_near_the_width_limit_is_not_chopped_up(width):
     """A ring whose width sits around the thin-line limit is sewn one way all the way round."""
     ring = Point(0, 0).buffer(30).difference(Point(0, 0).buffer(30 - width))
     objs = classify.run(_vec(ring), RULES)["objects"]
     assert 1 <= len(objs) <= 2 and len({o["kind"] for o in objs}) == 1
-    assert objs[0]["kind"] == ("run" if width < 0.85 else "satin")
+    assert objs[0]["kind"] == ("run" if width < RULES["satin_min_mm"] else "satin")
 
 
 def test_too_small_details_are_dropped_and_counted():

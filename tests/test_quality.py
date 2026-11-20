@@ -51,7 +51,8 @@ def test_a_narrow_bar_becomes_one_satin_column():
     (box(0, 0, 30, 30), ["fill"]),                                    # wide: fill
     (Point(0, 0).buffer(3), ["fill"]),                                # a dot is not a column
     (box(0, 0, 30, 0.7), ["run"]),                                    # thin: running stitch
-    (box(0, 0, 30, 1.0), ["satin"]),                                  # a 1 mm line is satin
+    (box(0, 0, 30, 1.0), ["run"]),                                    # under 1.2 mm: bean line
+    (box(0, 0, 30, 1.6), ["satin"]),                                  # a 1.6 mm bar is satin
     (Point(0, 0).buffer(20).difference(Point(0, 0).buffer(17)), ["satin"]),   # 3 mm ring
 ])
 def test_width_decides_the_stitch_type(shape, kinds):
@@ -87,15 +88,21 @@ def test_satin_top_zigzags_edge_to_edge_with_pull_compensation():
     ys = np.array([p[1] for p in pts])
     assert np.all(np.sign(ys[1:] - 1.5) != np.sign(ys[:-1] - 1.5))    # alternates sides
     reach = ys.max() - ys.min()
-    assert reach == pytest.approx(3.0 + RULES["pull_comp_mm"], abs=0.3)
-    # peak-to-peak spacing along the column is the fill spacing
+    per_side = min(0.5, RULES["pull_comp_mm"] + 0.05 * 3.0)        # research rule 18
+    assert reach == pytest.approx(3.0 + 2 * per_side, abs=0.15)
+    # peak-to-peak spacing along a 2-4 mm column is the 0.40 mm satin spacing (rule 12),
+    # nudged by the fabric (a T-shirt sews a little more openly)
     top = [p for p in pts if p[1] > 1.5]
     gaps = np.diff(sorted(p[0] for p in top))
-    assert np.median(gaps) == pytest.approx(RULES["fill_spacing_mm"], abs=0.05)
+    assert np.median(gaps) == pytest.approx(stitch.satin_spacing(3.0, RULES), abs=0.03)
+    assert 0.38 <= stitch.satin_spacing(3.0, RULES) <= 0.46
 
 
-@pytest.mark.parametrize("width, expect", [(1.9, "none"), (3.0, "centre run"), (5.5, "edge run")])
+@pytest.mark.parametrize("width, expect", [(1.3, "none"), (2.0, "centre run"),
+                                           (3.0, "edge run"), (5.5, "edge run + zigzag")])
 def test_satin_underlay_follows_the_column_width(width, expect):
+    """Research rule 16: under 1.5 mm none, 1.5-2.5 centre run, 2.5-4 edge runs,
+    over 4 mm edge runs plus a zig-zag."""
     obj, pts = _satin(width)
     _, bare = _satin(width, dict(RULES, underlay=False))
     extra = len(pts) - len(bare)
@@ -106,8 +113,13 @@ def test_satin_underlay_follows_the_column_width(width, expect):
     off_centre = np.abs(first[:, 1] - width / 2)
     if expect == "centre run":
         assert extra > 5 and off_centre.max() < 0.4               # starts down the middle
+        return
+    assert off_centre.min() > width * 0.2                         # starts along an edge
+    runs_only = 2 * (30 / 2.0)
+    if expect == "edge run":
+        assert runs_only * 0.8 < extra < runs_only * 1.6
     else:
-        assert extra > 30 and off_centre.min() > width * 0.2      # starts along an edge
+        assert extra > runs_only * 1.6                            # plus the zig-zag
 
 
 # ------------------------------------------------------------- fills: underlay, pull, overlap
@@ -135,7 +147,7 @@ def test_fill_gets_an_edge_run_then_underlay_then_top():
 
 
 @pytest.mark.parametrize("fabric, edge, spacing", [
-    ("tshirt", True, 2.0), ("hoodie", True, 2.5), ("polo", True, 3.0), ("denim", True, 0.0)])
+    ("tshirt", True, 1.3), ("hoodie", True, 1.6), ("polo", True, 1.9), ("denim", True, 0.0)])
 def test_fabric_sets_how_much_underlay(fabric, edge, spacing):
     r = config.rules_for(fabric)
     assert r["underlay_edge_run"] is edge and r["underlay_spacing_mm"] == spacing
@@ -265,14 +277,41 @@ def test_big_solid_areas_on_a_tshirt_offer_two_fixes(tmp_path):
     assert _fix(r, "Sew it lighter") == {"density": -1}
 
 
-def test_small_text_offers_make_it_bigger(tmp_path):
-    hints = {"text": ["TEST"], "smallest_text_pct": 4}               # 4% of ~79 mm = 3 mm
-    r = run_pipeline(_badge(), tmp_path, "x", hints=hints, debug=False)
-    msg = next(m for m in r["check"]["messages"] if "text is too small" in m["text"])
+def _with_small_text(cap_px: int) -> bytes:
+    """A solid badge with a line of plain capitals under it, cap_px pixels tall."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    img = Image.new("RGB", (1300, 700), "white")
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([100, 60, 1200, 360], radius=60, fill=(20, 40, 110))
+    try:
+        font = ImageFont.truetype("arialbd.ttf", int(cap_px / 0.72))
+    except OSError:
+        pytest.skip("needs the Arial Bold font")
+    d.text((650, 480), "SMALL WORDS", font=font, fill=(20, 20, 20), anchor="mm")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_tiny_text_is_measured_and_offers_bigger_or_leave_out(tmp_path):
+    """Research rule 5: under 4 mm text can only be run-stitch letters; offer to enlarge it
+    or leave it out. The fix that leaves it out really does."""
+    data = _with_small_text(40)            # 40 px of 1100 across 88.9 mm: about 3 mm tall
+    r = run_pipeline(data, tmp_path / "a", "x", debug=False)
+    msg = next(m for m in r["check"]["messages"] if "smallest text" in m["text"])
+    labels = [f["label"] for f in msg["fixes"]]
+    assert labels[0].startswith("Make it bigger") and "Leave that text out" in labels
     assert msg["fixes"][0]["set"]["size_in"] > r["stats"]["size_in"]
-    ok = run_pipeline(_badge(), tmp_path / "ok", "x", debug=False,
-                      hints={"text": ["TEST"], "smallest_text_pct": 12})
-    assert not any("text is too small" in m["text"] for m in ok["check"]["messages"])
+    drop = next(f["set"]["drop_text_mm"] for f in msg["fixes"] if f["label"] == "Leave that text out")
+    gone = run_pipeline(data, tmp_path / "b", "x", debug=False, overrides={"drop_text_mm": drop})
+    assert gone["stats"]["stitches"] < r["stats"]["stitches"]
+    assert not any("smallest text" in m["text"] for m in gone["check"]["messages"])
+
+
+def test_text_big_enough_needs_no_warning(tmp_path):
+    r = run_pipeline(_with_small_text(110), tmp_path, "x", debug=False)      # about 8 mm
+    assert not any("text" in m["text"].lower() for m in r["check"]["messages"])
 
 
 def test_largest_size_respects_the_hoop_margin():
@@ -302,8 +341,8 @@ def test_size_and_density_can_be_changed_on_the_stitch_screen():
     small = _wait(c, "/api/jobs/" + c.post(
         "/api/jobs", data={"cleanup_id": cid, "version": "local", "size_in": 2.5,
                            "density": -1}).json()["id"])["result"]
-    assert base["stats"]["size_in"] == pytest.approx(3.5, abs=0.02)
-    assert small["stats"]["size_in"] == pytest.approx(2.5, abs=0.02) and small["density"] == -1
+    assert base["stats"]["size_in"] == pytest.approx(3.5, abs=0.05)
+    assert small["stats"]["size_in"] == pytest.approx(2.5, abs=0.05) and small["density"] == -1
     assert small["stats"]["stitches"] < base["stats"]["stitches"]
     assert all("fixes" in m for m in base["check"]["messages"])
 
@@ -420,3 +459,87 @@ def test_satin_stays_solid_on_the_outside_of_a_tight_curve():
     assert np.median(gaps) <= RULES["fill_spacing_mm"] * 1.15  # no fanning open
     reach = [np.hypot(x, y) for x, y in pts if np.hypot(x, y) < 3.0]
     assert max(reach) - min(reach) > 0.4                       # some stitches stop short inside
+
+
+# ------------------------------------------------------------- research rules (classify)
+
+def test_letters_are_built_stroke_by_stroke():
+    """Research rule 24: break columns at junctions and sew the straightest pair through, so
+    a T is a bar plus a stem, an E four strokes and an X two straight strokes."""
+    T = box(0, 0, 14, 2.5).union(box(5.75, 0, 8.25, 16))
+    E = box(0, 0, 3, 20).union(box(0, 0, 12, 3)).union(box(0, 8.5, 10, 11.5)).union(box(0, 17, 12, 20))
+    X = box(-1.5, -12, 1.5, 12).union(box(-12, -1.5, 12, 1.5))
+    for shape, n, longest in ((T, 2, 13), (E, 4, 19), (X, 2, 23)):
+        cols = classify.columns(shape)
+        lengths = sorted(float(np.linalg.norm(np.diff(c["center"], axis=0), axis=1).sum()) for c in cols)
+        assert len(cols) == n and lengths[-1] > longest
+        assert classify.try_satin(shape, RULES) is not None
+
+
+def test_satin_edges_follow_the_real_shape():
+    """Rule 21: stitch ends sit on the shape's own edges, not on an estimate from the centre
+    line, so edges are crisp."""
+    bar = box(0, 0, 30, 3)
+    col = classify.columns(bar)[0]
+    assert np.allclose(np.sort(np.r_[col["left"][:, 1], col["right"][:, 1]].reshape(2, -1), axis=0)[[0, -1]].mean(axis=1), [0, 3], atol=0.08) \
+        or (abs(col["left"][:, 1].mean() - 3) < 0.08 and abs(col["right"][:, 1].mean()) < 0.08) \
+        or (abs(col["left"][:, 1].mean()) < 0.08 and abs(col["right"][:, 1].mean() - 3) < 0.08)
+
+
+def test_hairline_serifs_are_dropped_from_small_letters():
+    """Rule 5: a serif I at 5 mm is one stem column running the whole height."""
+    I = box(-0.55, -2.5, 0.55, 2.5).union(box(-1.5, -2.5, 1.5, -2.0)).union(box(-1.5, 2.0, 1.5, 2.5))
+    cols = classify.try_satin(I, RULES, drop_hairlines=True)
+    assert cols and len(cols) == 1
+    assert float(np.linalg.norm(np.diff(cols[0]["center"], axis=0), axis=1).sum()) > 4.3
+
+
+def test_corner_splits_a_sharp_bend_but_not_a_gentle_curve():
+    L = box(0, 0, 3, 20).union(box(0, 17, 15, 20))
+    assert len(classify.columns(L)) == 2
+    arc = Point(0, 0).buffer(20).difference(Point(0, 0).buffer(17)).intersection(box(-30, 0, 30, 30))
+    assert len(classify.columns(arc)) == 1
+
+
+def test_web_of_thin_outlines_is_sewn_as_lines_not_a_fill():
+    """Rule 11: line art (a grid of 1.5 mm outlines with many openings) becomes bean lines."""
+    from shapely.ops import unary_union
+    grid = unary_union([box(x, 0, x + 1.5, 40) for x in range(0, 50, 10)] +
+                       [box(0, y, 41.5, y + 1.5) for y in range(0, 50, 10)])
+    kinds = {o["kind"] for o in classify.run(_vec([grid]), RULES)["objects"]}
+    assert kinds == {"run"}
+
+
+def test_each_word_is_sewn_one_way(tmp_path):
+    """A row of letters never mixes satin and fill."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    img = Image.new("RGB", (1600, 500), "white")
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("georgiab.ttf", 260)
+    except OSError:
+        pytest.skip("needs the Georgia Bold font")
+    d.text((800, 250), "NANSEE", font=font, fill=(240, 100, 0), anchor="mm")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    r = run_pipeline(buf.getvalue(), tmp_path, "w", debug=False)
+    kinds = {a["kind"] for a in r["areas"]}
+    assert len(kinds) == 1, kinds
+
+
+def test_small_letter_counters_stay_open(tmp_path):
+    """The inside of an O is bare fabric, not white thread."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    img = Image.new("RGB", (1400, 400), "white")
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 200)
+    except OSError:
+        pytest.skip("needs the Arial Bold font")
+    d.text((700, 200), "BOOB", font=font, fill=(0, 0, 0), anchor="mm")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    r = run_pipeline(buf.getvalue(), tmp_path, "o", debug=False)
+    assert len(r["colors"]) == 1

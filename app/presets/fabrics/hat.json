@@ -5,7 +5,7 @@
   "material": "structured cap",
   "rules": {
     "fill_spacing_mm": 0.4,
-    "pull_comp_mm": 0.3,
+    "pull_comp_mm": 0.35,
     "underlay_level": "medium",
     "cap_mode": true
   },

@@ -95,6 +95,7 @@ const state = {
   sizeIn: null,             // widest side chosen on the Stitches screen (null = screen 1's)
   density: 0,               // softer (-2) .. denser (+2)
   inside: 'auto',           // blank areas inside the design: auto | sew | open
+  dropTextMm: 0,            // text shorter than this is left out (a one-click fix)
   moreFabrics: false,
   jobId: null,
   result: null,
@@ -311,6 +312,7 @@ async function startCleanup() {
   state.sizeIn = null;                 // a new clean-up starts from screen 1's size again
   state.density = 0;
   state.inside = 'auto';
+  state.dropTextMm = 0;
   state.edits = [];
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
@@ -509,6 +511,7 @@ async function startJob(force) {
   form.append('colors', String(state.colors));
   form.append('density', String(state.density));
   form.append('inside', state.inside);
+  form.append('drop_text_mm', String(state.dropTextMm));
   form.append('edits', JSON.stringify(state.edits));
   if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
@@ -594,6 +597,7 @@ function showResult() {
 function applyFix(set) {
   if (set.size_in !== undefined) state.sizeIn = Math.min(12, Math.max(0.5, Number(set.size_in)));
   if (set.density !== undefined) state.density = Math.min(2, Math.max(-2, Number(set.density)));
+  if (set.drop_text_mm !== undefined) state.dropTextMm = Number(set.drop_text_mm) || 0;
   startJob(true);
 }
 

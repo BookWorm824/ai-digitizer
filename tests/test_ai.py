@@ -56,7 +56,8 @@ def test_prompt_follows_the_brief_template():
     p = optimize.build_prompt(optimize.VARIANTS[0], CTX)
     assert p.startswith("Redraw this image as embroidery-ready artwork for a 3.5-inch design "
                         "on a t-shirt (knit).")
-    for part in ("flat solid colors only", "Maximum 6 colors", "at least 1 mm thick",
+    for part in ("flat solid colors only", "Maximum 6 colors", "at least 1.2 mm thick",
+                 "hatching", "at least 1 mm of space",
                  'Keep text exactly as written: "TEST", at least 5 mm tall',
                  "Plain white background", "Center it"):
         assert part in p

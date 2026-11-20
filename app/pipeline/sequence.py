@@ -27,7 +27,7 @@ from shapely.prepared import prep
 
 from .common import dist
 
-ALWAYS_JOIN_MM = 1.5       # a hop this short is no more visible than an ordinary stitch
+ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinary stitch
 KIND_ORDER = ("fill", "satin", "run")
 CAP_BAND_MM = 20.0
 

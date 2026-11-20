@@ -109,8 +109,25 @@ def run(plan: dict, stitched: dict, classified: dict, fabric: dict, hoops: list,
         add("yellow", f"{n} tiny detail{'s were' if n != 1 else ' was'} too small to sew and "
                       "left out.",
             [size_fix("Make it bigger", bigger)] if bigger > widest_in + 0.1 else [])
+    # Text size, measured on the lettering the classifier found (research rule 5): under
+    # text_run_mm it can only be sewn as thin run-stitch letters; under min_text_mm it sews
+    # but reads poorly. Offer to enlarge, or for the tiniest text, to leave it out.
+    measured = classified.get("text_heights") or []
+    if measured:
+        text_mm = measured[0]
+        need = min(max_in, math.ceil(widest_in * rules["min_text_mm"] / text_mm * 4) / 4)
+        fixes = [size_fix("Make it bigger", need)] if need > widest_in + 0.1 else []
+        if text_mm < rules["text_run_mm"]:
+            fixes.append({"label": "Leave that text out",
+                          "set": {"drop_text_mm": round(text_mm + 0.05, 2)}})
+            add("yellow", f"The smallest text is only about {text_mm:.1f} mm tall. Under "
+                          f"{rules['text_run_mm']:g} mm it can only be sewn as thin outline "
+                          "letters, and may not be readable.", fixes)
+        elif text_mm < rules["min_text_mm"] - 0.2:
+            add("yellow", f"Some text is small (about {text_mm:.0f} mm tall). It will sew, but "
+                          f"{rules['min_text_mm']:g} mm or more reads best.", fixes)
     pct = hints.get("smallest_text_pct")
-    if hints.get("text") and pct:
+    if not measured and hints.get("text") and pct:
         text_mm = h * pct / 100.0
         if text_mm < rules["min_text_mm"] - 0.2:
             need = min(max_in, math.ceil(widest_in * rules["min_text_mm"] / text_mm * 4) / 4)

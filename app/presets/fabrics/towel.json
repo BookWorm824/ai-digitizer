@@ -5,7 +5,7 @@
   "material": "terry or minky",
   "rules": {
     "fill_spacing_mm": 0.4,
-    "pull_comp_mm": 0.3,
+    "pull_comp_mm": 0.4,
     "underlay_level": "heavy",
     "knockdown": true,
     "min_detail_mm": 1.5

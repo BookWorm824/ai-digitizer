@@ -6,7 +6,7 @@
   "more": true,
   "rules": {
     "fill_spacing_mm": 0.4,
-    "pull_comp_mm": 0.35,
+    "pull_comp_mm": 0.4,
     "underlay_level": "heavy",
     "min_detail_mm": 1.5
   },

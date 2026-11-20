@@ -70,7 +70,7 @@ def run(clean: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
     # amount shapes are grown later, and centre it.
     everything = unary_union([p for layer in layers for p in layer["polys"]])
     minx, miny, maxx, maxy = everything.bounds
-    grow = rules["pull_comp_mm"]  # worst case growth on each side, see classify
+    grow = 2 * rules["pull_comp_mm"]  # worst case: satin grows by this much in total
     f = min((fit_w_mm - grow) / (maxx - minx), (fit_h_mm - grow) / (maxy - miny))
     cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
     for layer in layers:

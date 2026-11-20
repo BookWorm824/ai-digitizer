@@ -20,36 +20,41 @@ MM_PER_INCH = 25.4
 
 # Starting values from the "Digitizing rules" table in BRIEF.md. All lengths in millimetres.
 RULES: dict = {
+    # Shapes and stitch types (see reports/Embroidery digitizing rules.md for sources)
     "min_detail_mm": 1.0,         # smaller than this won't sew
-    # Narrower than this becomes a running stitch. The brief's table says 1.5 mm, but at
-    # 1.5 a 1 mm outline around lettering is sewn as a single thin line and looks spindly;
-    # satin sews cleanly down to about 1 mm, so that is the limit used.
-    "thin_line_mm": 1.0,
+    "satin_min_mm": 1.2,          # narrowest satin that looks good (Melco 1.2; others 1.0-1.5)
+    "satin_max_mm": 7.0,          # widest satin on wearables before it snags (Wilcom ~7)
     "satin": True,                # narrow columns are sewn as satin
-    "satin_max_mm": 7.0,          # wider than this is a fill (wide satins snag and loop)
-    "bean_line_mm": 0.6,          # thin lines at least this wide get a triple (bean) run
+    "bean_line_mm": 0.3,          # visible detail lines get a bean (triple) run (Goodall)
+    "bean_stitch_mm": 2.0,        # bean stitch length (sources: about 2 mm)
+    "text_run_mm": 4.0,           # lettering shorter than this is sewn as run/bean letters
+    "min_text_mm": 6.0,           # smallest cap height that reads cleanly in satin (Hatch, Melco)
+    # Density and stitch lengths
     "fill_spacing_mm": 0.4,       # row spacing of a fill (fabric presets override)
-    "fill_stitch_mm": 3.5,
+    "fill_stitch_mm": 4.0,        # tatami stitch length (Wilcom 4; shorter ripples after washing)
     "run_stitch_mm": 2.5,
     "run_stitch_curve_mm": 1.5,   # on tight curves
-    "max_stitch_mm": 7.0,         # longer stitches are split
+    "max_stitch_mm": 7.0,         # longer stitches are split (Wilcom auto-split ~7 on wearables)
     "min_stitch_mm": 0.5,         # shorter stitches are dropped
-    "pull_comp_mm": 0.2,          # stitches are lengthened by this much in total, because
-                                  # they pull a shape narrower (fabric presets override)
+    # Pull compensation, PER SIDE, as in Wilcom's table: cotton/drill 0.20, T-shirt 0.35,
+    # fleece 0.40, lettering 0.2-0.3. Fabric presets override. Satin uses the full value
+    # (less on very narrow columns); fill rows use 60 % of it, since fill pulls in less.
+    "pull_comp_mm": 0.2,
     "overlap_mm": 0.4,            # how far a color reaches under the colors sewn after it
-    "trim_jump_mm": 3.0,          # jumps longer than this get a trim
+    "trim_jump_mm": 2.5,          # jumps longer than this get a trim (Bernina 2, Wilcom 3)
     "max_colors": 6,
-    # Blank areas (background color) shut inside the design: True = sew them in that color,
-    # False = leave them open, "auto" = sew them for solid artwork, leave them for line art.
     "sew_enclosed_background": "auto",
-    "min_text_mm": 5.0,           # smallest capital-letter height that stays readable
     "hoop_margin_mm": 5.0,
+    # Underlay
     "underlay": True,             # master switch for underlay
     "underlay_level": "medium",   # none | light | medium | medium-heavy | heavy (see rules_for)
     "underlay_edge_run": True,    # a run just inside the edge of every fill
-    "underlay_spacing_mm": 3.0,   # row spacing of the fill underlay (0 = no fill underlay)
-    "underlay_inset_mm": 0.6,
-    "underlay_min_width_mm": 3.0,  # shapes narrower than this get no underlay
+    "underlay_spacing_mm": 2.5,   # row spacing of the fill underlay (0 = no fill underlay)
+    "underlay_inset_mm": 0.5,     # edge-run inset (sources: 0.2-0.6)
+    "underlay_min_width_mm": 3.0,  # shapes narrower than this get no fill underlay
+    "satin_center_run_mm": 1.5,   # satin at least this wide gets a centre run (narrower: none)
+    "satin_edge_run_mm": 2.5,     # ...at least this wide gets edge runs instead
+    "satin_zigzag_mm": 4.0,       # ...at least this wide gets edge runs plus a zig-zag
     "tie_mm": 0.7,                # length of the lock stitches at thread starts and ends
     "machine_spm": 650,           # stitches per minute, for the sew-time estimate
     "large_fill_mm2": 2000.0,     # "big solid area" warning threshold
@@ -58,6 +63,9 @@ RULES: dict = {
     "knockdown_spacing_mm": 1.5,
     "work_px_per_mm": 10.0,       # working resolution of the cleanup pass
     "work_max_px": 2400,
+    "min_gap_mm": 0.5,            # unsewn gaps narrower than this close up when sewn: fill them
+    "min_enclosed_mm2": 25.0,     # blank areas inside the design smaller than this (letter
+                                  # counters) stay open fabric rather than being sewn
 }
 
 
@@ -101,12 +109,12 @@ def machines() -> list:
 
 
 # How much fill underlay each level means: (edge run?, fill-underlay row spacing in mm).
-UNDERLAY_LEVELS = {
+UNDERLAY_LEVELS = {                  # Ink/Stitch uses 3x the top spacing (about 1.2 mm)
     "none": (False, 0.0),
     "light": (True, 0.0),            # edge run only: stable fabrics like denim
-    "medium": (True, 3.0),
-    "medium-heavy": (True, 2.5),
-    "heavy": (True, 2.0),            # stretchy knits and deep pile
+    "medium": (True, 1.9),
+    "medium-heavy": (True, 1.6),
+    "heavy": (True, 1.3),            # stretchy knits and deep pile
 }
 
 # The "softer <-> denser" slider: how much further apart or closer the stitch rows sit.

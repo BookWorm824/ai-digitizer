@@ -105,6 +105,21 @@ def _tuples(a: np.ndarray) -> list:
     return [(float(x), float(y)) for x, y in a]
 
 
+def satin_spacing(width: float, rules: dict) -> float:
+    """Row spacing for a satin column of this width (research rule 12): narrow columns are sewn
+    more openly, wide ones denser, as Wilcom's auto spacing does. 1.2-2 mm: 0.45; 2-4 mm: 0.40;
+    4-7 mm: 0.37. The fabric preset nudges the whole table (a T-shirt's 0.45 fill makes satin
+    about 7 % more open than a twill's 0.42)."""
+    if width < 2.0:
+        table = 0.45
+    elif width < 4.0:
+        table = 0.40
+    else:
+        table = 0.37
+    nudge = min(1.15, max(0.9, rules["fill_spacing_mm"] / 0.42))
+    return table * nudge
+
+
 def stitch_satin(obj: dict, rules: dict) -> list:
     """One satin column: underlay to suit its width, then the zig-zag top, as one segment."""
     center, half = np.asarray(obj["center"], float), np.asarray(obj["half"], float)
@@ -113,12 +128,21 @@ def stitch_satin(obj: dict, rules: dict) -> list:
     if total < 0.5:
         return []
     width = 2 * float(np.median(half))
-    # Each side is widened because stitches pull a column narrower. A very narrow column
-    # gets less, or a 1 mm outline would come out half as wide again.
-    grow = min(rules["pull_comp_mm"] / 2.0, 0.03 + 0.12 * width)
-    left, right = column_rails(center, half + grow)
-    inset = np.minimum(0.5, half * 0.35)
-    in_left, in_right = column_rails(center, half - inset)
+    if obj.get("left") is not None and obj.get("right") is not None:
+        edge_l, edge_r = np.asarray(obj["left"], float), np.asarray(obj["right"], float)
+    else:
+        edge_l, edge_r = column_rails(center, half)
+    across = edge_l - edge_r
+    unit = across / np.maximum(np.linalg.norm(across, axis=1, keepdims=True), 1e-9)
+    # Stitches pull a column narrower, so each side is pushed out (Wilcom: 0.2-0.4 mm per
+    # side). A very narrow column gets less, or a fine outline would come out much too fat.
+    # Research rule 18: fabric base + about 5 % of the width, at most 0.5 mm per side, and
+    # scaled down on columns under 2.5 mm so fine outlines and small letters stay fine.
+    grow = min(0.5, rules["pull_comp_mm"] + 0.05 * width) * min(1.0, width / 2.5)
+    grow *= obj.get("comp_scale", 1.0)
+    left, right = edge_l + unit * grow, edge_r - unit * grow
+    inset = np.minimum(rules.get("underlay_inset_mm", 0.5), half * 0.3)[:, None]
+    in_left, in_right = edge_l - unit * inset, edge_r + unit * inset
 
     def run_along(arr, forward=True):
         n = max(1, math.ceil(total / UNDERLAY_STITCH_MM))
@@ -155,16 +179,37 @@ def stitch_satin(obj: dict, rules: dict) -> list:
         out[0::2], out[1::2] = pa, pb
         return _tuples(out)
 
+    # Underlay by width (Wilcom, Hatch, Melco): none on very narrow columns, a centre run on
+    # medium ones, edge runs plus a loose zig-zag on wide ones. Lettering can ask for less.
+    # Research rule 16: under 1.5 mm none; 1.5-2.5 mm a centre run; 2.5-4 mm edge runs;
+    # over 4 mm edge runs plus a loose zig-zag. Lettering may ask for less (never edge runs
+    # under small letters).
+    kind = obj.get("underlay")
+    if kind is None:
+        if not rules.get("underlay") or width < rules["satin_center_run_mm"]:
+            kind = "none"
+        elif width < rules["satin_edge_run_mm"]:
+            kind = "center"
+        elif width < rules["satin_zigzag_mm"]:
+            kind = "edge"
+        else:
+            kind = "edge_zigzag"
+    elif kind == "center" and width < rules["satin_center_run_mm"]:
+        kind = "none"
     pts: list = []
     top_forward = True
-    if rules.get("underlay") and width >= 2.0:
-        if width > 4.0:                              # edge run both sides, then a loose zig-zag
-            pts += run_along(in_left, True) + run_along(in_right, False)
+    if kind in ("edge", "edge_zigzag"):
+        pts += run_along(in_left, True) + run_along(in_right, False)
+        if kind == "edge_zigzag":
             pts += zigzag(in_left, in_right, 2.0, True)
-        else:                                        # one run down the middle
-            pts += run_along(center, True)
-        top_forward = False                          # sew the top back to where we started
-    pts += zigzag(left, right, rules["fill_spacing_mm"], top_forward, short=True)
+        else:
+            top_forward = True                       # edge runs end back where they began
+        top_forward = kind != "edge_zigzag"
+    elif kind == "center":
+        pts += run_along((edge_l + edge_r) / 2, True)
+        top_forward = False
+    spacing = satin_spacing(width, rules) * obj.get("spacing_scale", 1.0)
+    pts += zigzag(left, right, spacing, top_forward, short=True)
     return [pts]
 
 
@@ -383,6 +428,21 @@ def _travel(p, q, inside, router: _Router, step: float):
     return out[:-1]
 
 
+def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
+    """The fill angle that cuts this shape into the fewest separate sections, so it needs the
+    fewest jumps and travel runs (research rule 20, after the Soft Sight patent). Tries the
+    usual angle and the two either side of it; ties keep the usual angle."""
+    if poly.area < 40.0:
+        return base
+    best = None
+    for k, angle in enumerate((base, base - 45.0, base + 45.0)):
+        rot = affinity.rotate(poly, -angle, origin=(0, 0))
+        n = len(_sections(_rows(rot, max(spacing * 4, 1.2))))
+        if best is None or n < best[0]:
+            best = (n, angle)
+    return best[1]
+
+
 def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float,
                   start=None, travel_step: float = 2.5,
                   extend: float = 0.0) -> list[list[tuple[float, float]]]:
@@ -461,7 +521,7 @@ def edge_run(poly: Polygon, inset: float, rules: dict) -> list:
 
 def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
     poly = obj["poly"]
-    extend = rules["pull_comp_mm"] / 2.0
+    extend = rules["pull_comp_mm"] * 0.5          # fill pulls in about half as much as satin
     cover = prep(poly.buffer(INSIDE_TOL_MM + extend))
     router = _Router(poly, cover)
     segments: list = []
@@ -518,7 +578,8 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     stitched = []
     for obj in classified["objects"]:
         if obj["kind"] == "run":
-            pts = run_points(obj["line"], rules)
+            step = obj.get("stitch_mm") or (rules["bean_stitch_mm"] if obj["bean"] else None)
+            pts = run_points(obj["line"], dict(rules, run_stitch_mm=step) if step else rules)
             if obj["bean"]:
                 pts = bean(pts)
             segments = [pts] if len(pts) > 1 else []
@@ -527,9 +588,14 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             segments = stitch_satin(obj, rules)
             shape = obj["outline"]
         else:
-            # neighbouring colors get crossing angles so they don't all pull the same way
-            angle = 45.0 if obj["color"] % 2 == 0 else 135.0
-            segments = stitch_fill(obj, rules, angle)
+            # neighbouring colors get crossing angles so they don't all pull the same way;
+            # a row of lettering shares one angle so the letters look alike
+            angle = obj.get("angle")
+            if angle is None:
+                angle = best_fill_angle(obj["poly"], 45.0 if obj["color"] % 2 == 0 else 135.0,
+                                        rules["fill_spacing_mm"])
+            segments = stitch_fill(obj, dict(rules, fill_spacing_mm=rules["fill_spacing_mm"]
+                                             * obj.get("spacing_scale", 1.0)), angle)
             shape = obj["poly"]
         if segments:
             stitched.append({"kind": obj["kind"], "color": obj["color"], "segments": segments,

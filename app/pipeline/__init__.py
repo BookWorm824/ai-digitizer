@@ -50,6 +50,8 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     rules = config.rules_for(fabric["id"], overrides, density)
     if max_colors:
         rules["max_colors"] = int(max_colors)
+    if (overrides or {}).get("drop_text_mm"):
+        rules["drop_text_mm"] = float(overrides["drop_text_mm"])
     if inside in ("sew", "open"):       # the user's own choice for blank areas inside the design
         rules["sew_enclosed_background"] = inside == "sew"
 
@@ -63,6 +65,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     cleaned = clean.run(img, fit_w_mm, fit_h_mm, rules, debug_dir)
     say("vectorize")
     vec = vectorize.run(cleaned, fit_w_mm, fit_h_mm, rules, debug_dir)
+    vec["inside_color"] = cleaned.get("inside_color")
     say("classify")
     classified = classify.run(vec, rules, debug_dir)
     palette = list(cleaned["palette"])
@@ -126,6 +129,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                   "hoop": check["hoop"]["name"] if check["hoop"] else None},
         "density": density,
         "inside": cleaned["inside"],
+        "drop_text_mm": rules.get("drop_text_mm", 0.0),
         "project": None if not made else {
             "type": made["type"], "name": made["name"], "shape": made["shape"],
             "size_in": made["size_in"], "body_mm": made["body_mm"],

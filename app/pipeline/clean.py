@@ -198,6 +198,13 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         _, cc = cv2.connectedComponents(m, connectivity=4)
         outside = np.unique(np.concatenate([cc[0], cc[-1], cc[:, 0], cc[:, -1]]))
         inside = (m == 1) & ~np.isin(cc, outside[outside != 0])
+        # Tiny blanks (the insides of small letters) stay open fabric. Bigger letter counters
+        # are found later, once the lettering has been recognised (see classify).
+        n_cc, cc2, stats, _ = cv2.connectedComponentsWithStats(inside.astype(np.uint8), connectivity=4)
+        open_ids = [k for k in range(1, n_cc)
+                    if stats[k, cv2.CC_STAT_AREA] < rules["min_enclosed_mm2"] * ppm * ppm]
+        if open_ids:
+            inside &= ~np.isin(cc2, open_ids)
         if inside.sum() < 4 * (rules["min_detail_mm"] * ppm) ** 2:
             return None
         found["present"] = True
@@ -231,12 +238,23 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
             "We could only find one flat color in this picture, so there is nothing to stitch. "
             "Try a picture where the design stands out from its background.")
     labels = np.full((H, W), BG, np.uint8)
+    inside_label = None
     for i, c in enumerate(sewn):
         labels[cmap == c] = i
     inside = enclosed_background()
     if inside is not None:
         labels[inside] = len(sewn)          # its own color: the background color, but sewn
         sewn.append(bg_id)
+        inside_label = len(sewn) - 1
+
+    # Gaps of bare fabric narrower than min_gap_mm close up when sewn anyway (thread spreads):
+    # give them to the color around them now, so they don't become ragged slivers.
+    gap = max(1, int(round(rules.get("min_gap_mm", 0.5) * ppm)))
+    kernel_gap = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap + 1, gap + 1))
+    for c in range(len(sewn)):
+        m = (labels == c).astype(np.uint8)
+        grown = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel_gap).astype(bool)
+        labels[grown & (labels == BG)] = c
 
     labels = _smooth(labels, max(0.8, 0.12 * ppm))
     min_area_px = 0.8 * (rules["min_detail_mm"] * ppm) ** 2
@@ -259,7 +277,8 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         src = core if core.sum() >= 50 else m
         palette.append(tuple(int(v) for v in np.median(rgb_w[src], axis=0)))
 
-    result = {"labels": out, "palette": palette, "ppm": float(ppm),
+    inside_color = ids.index(inside_label) if inside_label in ids else None
+    result = {"labels": out, "palette": palette, "ppm": float(ppm), "inside_color": inside_color,
               "has_background": bool(alpha_w is not None or bg_id is not None),
               "inside": dict(found)}
     if debug_dir is not None:

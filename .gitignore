@@ -10,3 +10,6 @@ out/
 debug/
 # The original brief PDF stays on this PC; BRIEF.md is the copy kept with the code
 *Build Brief.pdf
+
+# Research working notes (the finished report in reports/ is kept)
+research_notes/
