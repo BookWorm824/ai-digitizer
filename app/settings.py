@@ -26,6 +26,7 @@ def load() -> dict:
     """Settings with defaults filled in."""
     d = ai_defaults()
     out = {
+        "ai_provider": "auto",   # auto | chatgpt (the ChatGPT plan) | api (an OpenAI key)
         "openai_api_key": "",
         "models": dict(d["models"]),
         "quality": dict(d["quality"]),

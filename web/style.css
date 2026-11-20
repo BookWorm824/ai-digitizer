@@ -163,3 +163,8 @@ dialog::backdrop { background: rgba(20,24,34,.45); }
 .settingsForm input { font: inherit; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .keyStatus { font-weight: 600; margin: 10px 0 0; }
 .keyStatus.ok { color: var(--green); }
+
+/* ───────────── ChatGPT plan / key choice in Settings ───────────── */
+.settingsForm .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.settingsForm .choices button { flex: 1 1 200px; }
+.working button { margin-top: 6px; }

@@ -50,7 +50,7 @@ def _pick_default(versions: list[dict]) -> str:
     return "local"
 
 
-def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str,
+def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str, use_ai: bool = True,
                 progress: Callable[[str], None] | None = None) -> dict:
     say = progress or (lambda _label: None)
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -63,9 +63,16 @@ def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str,
     src_png = analyze.png_of(img["rgb"])
     (job_dir / "source.png").write_bytes(src_png)
 
-    use_ai = ai.available()
+    problem = None
+    if not use_ai:
+        problem = "skipped"
+    else:
+        try:
+            ai.provider()
+        except ai.AIUnavailable as e:
+            use_ai, problem = False, e.reason
     if use_ai:
-        say("Looking at your picture…")
+        say("ChatGPT is looking at your picture…")
     info = analyze.run(img, use_ai=use_ai)
 
     say("Cleaning up your art…")
@@ -85,10 +92,10 @@ def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str,
         "tweaks": 0,
     }
 
-    problem = "no_key" if not use_ai else info["ai_problem"]
+    problem = problem or info["ai_problem"]
     versions = []
     if use_ai and problem is None:
-        say("Drawing 3 embroidery-ready versions…")
+        say("ChatGPT is drawing 3 versions. This takes a minute or two…")
         made, problem = optimize.make_versions(src_png, ctx)
         for v in made:
             (job_dir / f"{v['id']}.png").write_bytes(v["png"])
@@ -107,11 +114,18 @@ def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str,
         "versions": [_public(v) for v in versions],
         "default": _pick_default(versions),
         "ai": {"used": len(versions) > 1, "problem": problem,
-               "note": ai.REASONS[problem] if problem else None},
+               "note": ai.REASONS.get(problem) if problem else None},
         "text": info["text"],
         "tip": tip,
         "spend": ai.status(),
     }
+
+
+def _using_api() -> bool:
+    try:
+        return ai.provider() == "api"
+    except ai.AIUnavailable:
+        return False
 
 
 def _version_png(job_dir: Path, version_id: str) -> bytes:
@@ -170,7 +184,8 @@ def picture_to_stitch(job_dir: Path, version_id: str,
     if version is None or version["kind"] == "local":
         return (job_dir / "upload.bin").read_bytes()
     png = (job_dir / f"{version_id}.png").read_bytes()
-    if settings.load()["final_polish"] and ai.available():
+    # Only the pay-as-you-go path draws low-quality previews, so only it needs a polish.
+    if settings.load()["final_polish"] and _using_api():
         if progress:
             progress("Polishing your art…")
         polished = optimize.polish(png, ctx)

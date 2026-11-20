@@ -21,7 +21,8 @@ const remember = (key, value) => {
 
 const state = {
   options: null,
-  ai: null,                 // { has_key, key_hint, daily_spend_cap_usd, spent_today_usd, estimate_usd }
+  ai: null,                 // { provider, chatgpt, has_key, spent_today_usd, estimate_usd, ... }
+  skipAi: false,            // the user pressed "Skip AI" for this picture
   file: null,
   size: 'left_chest',
   sizeChosenByHand: false,
@@ -112,15 +113,17 @@ function renderAiLine() {
   const p = $('#aiLine');
   p.innerHTML = '';
   if (!state.ai) return;
-  if (state.ai.has_key) {
+  if (state.ai.provider === 'chatgpt') {
+    p.textContent = 'AI clean-up is on, using your ChatGPT plan. It takes a minute or two a picture.';
+  } else if (state.ai.provider === 'api') {
     p.textContent = `AI clean-up costs about ${money(state.ai.estimate_usd)} a picture. ` +
       `Today so far: $${state.ai.spent_today_usd.toFixed(2)} of $${state.ai.daily_spend_cap_usd.toFixed(2)}.`;
   } else {
     p.append('AI clean-up is off. ');
-    const b = el('button', 'link', 'Add your OpenAI key');
+    const b = el('button', 'link', 'Turn it on');
     b.type = 'button';
     b.addEventListener('click', openSettings);
-    p.append(b, ' to turn it on. It works without it too.');
+    p.append(b, ' in Settings. The app works without it too.');
   }
 }
 
@@ -140,6 +143,7 @@ function setFile(file) {
   state.file = file;
   state.fileStamp = Date.now();
   state.colors = state.maxColors;      // a new picture starts from the default again
+  state.skipAi = false;
   const img = $('#thumb');
   if (img.src) URL.revokeObjectURL(img.src);
   img.src = URL.createObjectURL(file);
@@ -193,7 +197,7 @@ function showCleanupStage(which) {
 
 function cleanupKey() {
   return [state.fileStamp, state.size, state.size === 'custom' ? $('#customIn').value : '',
-    state.fabric, state.ai && state.ai.has_key].join('|');
+    state.fabric, state.ai && state.ai.provider, state.skipAi].join('|');
 }
 
 async function startCleanup() {
@@ -207,6 +211,7 @@ async function startCleanup() {
   state.stitchedFor = null;
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
+  $('#skipAi').hidden = state.skipAi || !(state.ai && state.ai.provider);
   const key = cleanupKey();
 
   const form = new FormData();
@@ -214,6 +219,7 @@ async function startCleanup() {
   form.append('size', state.size);
   form.append('custom_in', $('#customIn').value || '4');
   form.append('fabric', state.fabric);
+  form.append('use_ai', state.skipAi ? 'false' : 'true');
   try {
     const { id } = await api('api/cleanup', { method: 'POST', body: form });
     const job = await waitFor('api/cleanup/' + id, token, $('#cLabel'));
@@ -249,7 +255,17 @@ function showCleanup() {
   const c = state.cleanup;
   showCleanupStage('ready');
   if (c.spend) state.ai = c.spend;
-  notice('#cNote', c.ai.note, ['no_key', 'bad_key', 'cap'].includes(c.ai.problem));
+  notice('#cNote', c.ai.note, ['off', 'no_key', 'bad_key', 'cap', 'chatgpt_missing',
+    'chatgpt_signed_out'].includes(c.ai.problem));
+  if (c.ai.problem === 'skipped') {
+    const p = $('#cNote');
+    p.hidden = false;
+    p.textContent = 'You skipped AI for this picture. ';
+    const b = el('button', 'link', 'Use AI after all');
+    b.type = 'button';
+    b.addEventListener('click', () => { state.skipAi = false; startCleanup(); });
+    p.append(b);
+  }
   notice('#cTip', c.tip);
   notice('#cFlash', c.flash);
   if (!c.versions.some((v) => v.id === state.version)) state.version = c.default;
@@ -319,7 +335,7 @@ function showCleanup() {
 
   $('#tweakBox').hidden = !c.ai.used;
   const s = state.ai;
-  $('#cCost').textContent = c.ai.used && s
+  $('#cCost').textContent = c.ai.used && s && s.provider === 'api'
     ? `AI spending today: $${s.spent_today_usd.toFixed(2)} of $${s.daily_spend_cap_usd.toFixed(2)}.`
     : '';
 }
@@ -353,6 +369,7 @@ function setupScreen2() {
   $('#back2').addEventListener('click', () => { state.runToken++; go(1); });
   $('#cFailBack').addEventListener('click', () => { state.runToken++; go(1); });
   $('#next2').addEventListener('click', () => startJob());
+  $('#skipAi').addEventListener('click', () => { state.skipAi = true; startCleanup(); });
   $('#tweakBtn').addEventListener('click', () => {
     if ($('#tweakText').value.trim()) changeVersions('tweak', state.version);
   });
@@ -580,23 +597,57 @@ function setupScreen4() {
 // ───────────────────────── settings ─────────────────────────
 function renderSettings() {
   const s = state.ai;
+  const useKey = s.provider_setting === 'api';
+  choiceButtons($('#providers'), [
+    { id: 'auto', name: 'My ChatGPT plan', detail: 'No extra cost' },
+    { id: 'api', name: 'An OpenAI key', detail: 'Pay for each picture' },
+  ], useKey ? 'api' : 'auto', (id) => saveSettings({ ai_provider: id }));
+  $('#planBox').hidden = useKey;
+  $('#keyBox').hidden = !useKey;
+  $('#removeKey').hidden = !useKey || !s.has_key;
+  $('#saveSettings').hidden = !useKey;
+
+  const plan = $('#planStatus');
+  plan.className = 'keyStatus' + (s.chatgpt === 'ready' ? ' ok' : '');
+  plan.textContent = {
+    ready: 'Signed in to ChatGPT. AI clean-up is on.',
+    signed_out: "ChatGPT isn't signed in yet. Press Sign in, finish in the window that opens, then press Check again.",
+    missing: "The ChatGPT helper program (Codex) isn't installed on this PC. Get it at chatgpt.com/codex, then press Check again.",
+  }[s.chatgpt] || '';
+  $('#signInBtn').hidden = s.chatgpt !== 'signed_out';
+  $('#recheckBtn').hidden = s.chatgpt === 'ready';
+
   const status = $('#keyStatus');
   status.className = 'keyStatus' + (s.has_key ? ' ok' : '');
   status.textContent = s.has_key
     ? `A key is saved${s.key_hint ? ` (ends in ${s.key_hint.replace('…', '')})` : ''}. AI clean-up is on.`
-    : 'No key saved. AI clean-up is off.';
+    : 'No key saved yet.';
   $('#keyInput').value = '';
   $('#keyInput').placeholder = s.has_key ? 'Paste a new key to replace it' : 'sk-…';
   $('#capInput').value = s.daily_spend_cap_usd;
-  $('#removeKey').hidden = !s.has_key;
   $('#spendLine').textContent = `Spent today: $${s.spent_today_usd.toFixed(2)}. ` +
     `A picture costs about ${money(s.estimate_usd)}. When the limit is reached the app keeps working without AI.`;
   $('#settingsError').hidden = true;
 }
 
+function settingsError(text) {
+  const p = $('#settingsError');
+  p.textContent = text;
+  p.hidden = false;
+}
+
+async function refreshAi() {
+  try {
+    state.ai = await api('api/settings?refresh=true');
+    renderSettings();
+    renderAiLine();
+  } catch (err) { settingsError(err.message); }
+}
+
 function openSettings() {
   renderSettings();
   $('#settings').showModal();
+  refreshAi();
 }
 
 async function saveSettings(body) {
@@ -608,9 +659,7 @@ async function saveSettings(body) {
     renderAiLine();
     return true;
   } catch (err) {
-    const p = $('#settingsError');
-    p.textContent = err.message;
-    p.hidden = false;
+    settingsError(err.message);
     return false;
   }
 }
@@ -619,6 +668,10 @@ function setupSettings() {
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#closeSettings').addEventListener('click', () => $('#settings').close());
   $('#removeKey').addEventListener('click', () => saveSettings({ remove_key: true }));
+  $('#recheckBtn').addEventListener('click', refreshAi);
+  $('#signInBtn').addEventListener('click', async () => {
+    try { await api('api/chatgpt/signin', { method: 'POST' }); } catch (err) { settingsError(err.message); }
+  });
   $('#saveSettings').addEventListener('click', async () => {
     const body = { daily_spend_cap_usd: $('#capInput').value };
     const key = $('#keyInput').value.trim();

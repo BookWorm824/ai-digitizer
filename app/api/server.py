@@ -18,7 +18,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, ai, cleanup, config, settings
+from .. import __version__, ai, chatgpt, cleanup, config, settings
 from ..pipeline import PipelineError, run_pipeline
 
 MAX_UPLOAD = 40 * 1024 * 1024
@@ -99,13 +99,26 @@ def options():
 
 
 @app.get("/api/settings")
-def get_settings():
-    return ai.status()
+def get_settings(refresh: bool = False):
+    return ai.status(refresh)
+
+
+@app.post("/api/chatgpt/signin")
+def chatgpt_signin():
+    """Open the "Sign in to ChatGPT" window on this PC."""
+    try:
+        chatgpt.open_sign_in()
+    except chatgpt.ChatGPTError:
+        raise HTTPException(400, "The ChatGPT helper program (Codex) isn't installed yet. "
+                                 "Get it from chatgpt.com/codex, then try again.")
+    return {"ok": True}
 
 
 @app.post("/api/settings")
 def post_settings(body: dict = Body(...)):
     changes = {}
+    if body.get("ai_provider") in ("auto", "chatgpt", "api"):
+        changes["ai_provider"] = body["ai_provider"]
     if body.get("remove_key"):
         changes["openai_api_key"] = ""
     elif body.get("api_key"):
@@ -131,7 +144,8 @@ def post_settings(body: dict = Body(...)):
 
 @app.post("/api/cleanup")
 async def create_cleanup(file: UploadFile = File(...), size: str = Form("left_chest"),
-                         custom_in: float | None = Form(None), fabric: str = Form("tshirt")):
+                         custom_in: float | None = Form(None), fabric: str = Form("tshirt"),
+                         use_ai: bool = Form(True)):
     data = await _read_upload(file)
     cid = uuid.uuid4().hex[:12]
     job = {"status": "working", "label": "Getting started…", "name": _safe_name(file.filename),
@@ -142,7 +156,7 @@ async def create_cleanup(file: UploadFile = File(...), size: str = Form("left_ch
 
     def work():
         job["result"] = cleanup.run_cleanup(
-            data, job["dir"], fit=job["fit"], fabric_id=fabric,
+            data, job["dir"], fit=job["fit"], fabric_id=fabric, use_ai=use_ai,
             progress=lambda label: job.__setitem__("label", label))
 
     _background(job, work)

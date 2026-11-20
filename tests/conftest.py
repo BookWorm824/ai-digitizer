@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import make_images
-from app import ai
+from app import ai, chatgpt
 
 IMAGES = Path(__file__).parent / "images"
 
@@ -27,6 +27,11 @@ def data_dir(tmp_path, monkeypatch):
     d = tmp_path / "appdata"
     monkeypatch.setenv("AIDIGITIZER_DATA", str(d))
     ai.set_client_factory(None)
+    # Tests must never use the real ChatGPT plan on this PC: pretend Codex isn't installed
+    # unless a test installs its own stand-in.
+    monkeypatch.setattr(chatgpt, "find", lambda: None)
+    monkeypatch.setattr(chatgpt, "_base", lambda: tmp_path / "chatgpt-scratch")
+    chatgpt.forget_status()
     yield d
     ai.set_client_factory(None)
 

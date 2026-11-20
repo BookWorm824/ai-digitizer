@@ -1,4 +1,10 @@
-"""Everything that talks to OpenAI lives here.
+"""Everything that talks to ChatGPT / OpenAI lives here.
+
+Two ways in, chosen in Settings ("ai_provider"):
+  chatgpt  the user's ChatGPT plan, through the Codex program (app/chatgpt.py). No key, no
+           per-picture charge; it counts against the plan's own limits.
+  api      an OpenAI API key, pay as you go (the spending limit below applies to this one).
+  auto     (default) the ChatGPT plan when it is ready, otherwise the key if there is one.
 
 Three calls (BRIEF.md, "The ChatGPT stage"):
   analyze()    vision model -> facts about the picture, as JSON
@@ -25,10 +31,19 @@ import traceback
 
 from PIL import Image
 
-from . import config, settings
+from . import chatgpt, config, settings
 
 REASONS = {
+    "off": "AI clean-up is off. Open Settings to turn it on.",
     "no_key": "AI clean-up is off. Add your OpenAI key in Settings to turn it on.",
+    "chatgpt_missing": "The ChatGPT helper program (Codex) isn't installed on this PC. "
+                       "Open Settings to see how to get it. This is the simple clean-up for now.",
+    "chatgpt_signed_out": "ChatGPT isn't signed in. Open Settings and press Sign in. "
+                          "This is the simple clean-up for now.",
+    "chatgpt_limit": "You've used up your ChatGPT plan's allowance for now. It comes back "
+                     "after a while. This is the simple clean-up for now.",
+    "slow": "ChatGPT took too long this time, so this is the simple clean-up. "
+            "Go back and press Next to try again.",
     "cap": "You've reached today's AI spending limit, so this is the simple clean-up. "
            "You can raise the limit in Settings.",
     "offline": "We couldn't reach OpenAI. Check your internet connection. "
@@ -77,8 +92,34 @@ def _client():
     return OpenAI(api_key=key, timeout=180.0, max_retries=1)
 
 
+def provider() -> str:
+    """Which way in to use right now: 'chatgpt' or 'api'. Raises AIUnavailable (with the
+    reason) when neither can be used."""
+    if _client_factory is not None:
+        return "api"
+    s = settings.load()
+    want = s.get("ai_provider", "auto")
+    has_key = bool(s.get("openai_api_key"))
+    if want == "api":
+        if has_key:
+            return "api"
+        raise AIUnavailable("no_key")
+    state = chatgpt.status()
+    if state == "ready":
+        return "chatgpt"
+    if want == "auto" and has_key:
+        return "api"
+    if state == "signed_out":
+        raise AIUnavailable("chatgpt_signed_out")
+    raise AIUnavailable("chatgpt_missing" if want == "chatgpt" else "off")
+
+
 def available() -> bool:
-    return _client_factory is not None or bool(settings.load().get("openai_api_key"))
+    try:
+        provider()
+        return True
+    except AIUnavailable:
+        return False
 
 
 def _log(text: str) -> None:
@@ -95,6 +136,9 @@ def _call(fn):
         return fn()
     except AIUnavailable:
         raise
+    except chatgpt.ChatGPTError as e:
+        _log(f"ChatGPT (Codex) call failed: {e.reason}\n{e.detail}")
+        raise AIUnavailable(e.reason)
     except Exception as e:  # noqa: BLE001
         name, text = type(e).__name__, str(e).lower()
         _log(f"OpenAI call failed: {name}\n{traceback.format_exc()}")
@@ -174,9 +218,17 @@ def estimate_run(has_text: bool = True) -> float:
     return total
 
 
-def status() -> dict:
+def status(refresh: bool = False) -> dict:
+    """Everything the screens need to know about the AI (never the key itself)."""
     s = settings.public()
-    return {"has_key": s["has_key"] or _client_factory is not None, "key_hint": s["key_hint"],
+    state = chatgpt.status(refresh)
+    try:
+        using, problem = provider(), None
+    except AIUnavailable as e:
+        using, problem = None, e.reason
+    return {"provider_setting": s.get("ai_provider", "auto"), "provider": using,
+            "problem": problem, "chatgpt": state,
+            "has_key": s["has_key"] or _client_factory is not None, "key_hint": s["key_hint"],
             "daily_spend_cap_usd": s["daily_spend_cap_usd"],
             "spent_today_usd": round(spent_today(), 4),
             "estimate_usd": round(estimate_run(), 3)}
@@ -237,7 +289,8 @@ def _shrunk_png(png: bytes, max_side: int) -> bytes:
 
 
 def _vision_json(kind: str, png: bytes, instruction: str, schema_name: str, schema: dict) -> dict:
-    model = settings.load()["models"]["analyze"]
+    via = provider()
+    model = "chatgpt-plan" if via == "chatgpt" else settings.load()["models"]["analyze"]
     small = _shrunk_png(png, 1024)
     key = _cache_key(kind, model, instruction, schema, hashlib.sha256(small).hexdigest())
     path = _cache_path(key, "json")
@@ -246,6 +299,10 @@ def _vision_json(kind: str, png: bytes, instruction: str, schema_name: str, sche
             return json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             pass
+    if via == "chatgpt":
+        data = _call(lambda: chatgpt.ask_json(instruction, schema, small))
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return data
     client = _client()
     _check_cap(kind)
     b64 = base64.b64encode(small).decode("ascii")
@@ -328,10 +385,20 @@ def redraw(png: bytes, prompt: str, *, final: bool = False, attempt: int = 0) ->
     """Image edit: returns the redrawn picture as PNG bytes. `attempt` > 0 asks for a fresh
     try instead of the cached result."""
     s = settings.load()
+    via = provider()
+    small = _shrunk_png(png, 1536)
+    if via == "chatgpt":        # the plan has one quality; nothing to pay, nothing to cap
+        key = _cache_key("redraw", "chatgpt-plan", prompt, attempt,
+                         hashlib.sha256(small).hexdigest())
+        path = _cache_path(key, "png")
+        if path.exists() and path.stat().st_size > 0:
+            return path.read_bytes()
+        out = _call(lambda: chatgpt.redraw(small, prompt))
+        path.write_bytes(out)
+        return out
     model = s["models"]["redraw_final" if final else "redraw_preview"]
     quality = s["quality"]["final" if final else "preview"]
     kind = f"redraw_{quality}"
-    small = _shrunk_png(png, 1536)
     size = _edit_size(small)
     key = _cache_key("redraw", model, quality, size, prompt, attempt,
                      hashlib.sha256(small).hexdigest())

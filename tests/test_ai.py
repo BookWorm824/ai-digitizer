@@ -77,6 +77,7 @@ def test_prompt_never_invents_text_when_the_picture_has_none():
 # ----------------------------------------------------------------------------- AI wrapper
 
 def test_no_key_means_ai_is_unavailable_with_a_plain_reason(badge):
+    settings.save({"ai_provider": "api"})
     assert not ai.available()
     with pytest.raises(ai.AIUnavailable) as e:
         ai.analyze(badge)
@@ -146,7 +147,7 @@ def test_api_failures_become_plain_reasons(fake_ai, badge, error, reason):
 def test_without_ai_the_cleanup_still_gives_a_version(tmp_path, badge):
     r = cleanup.run_cleanup(badge, tmp_path / "job", fit=FIT, fabric_id="tshirt")
     assert [v["id"] for v in r["versions"]] == ["local"] and r["default"] == "local"
-    assert not r["ai"]["used"] and r["ai"]["problem"] == "no_key"
+    assert not r["ai"]["used"] and r["ai"]["problem"] == "off"
     assert len(r["versions"][0]["colors"]) == 3
     assert (tmp_path / "job" / "local.png").exists()
 
@@ -222,7 +223,8 @@ def _wait(client, url):
 
 def test_whole_flow_through_the_api_without_a_key(badge):
     c = TestClient(app)
-    assert c.get("/api/settings").json()["has_key"] is False
+    st = c.get("/api/settings").json()
+    assert st["has_key"] is False and st["provider"] is None and st["chatgpt"] == "missing"
     cid = c.post("/api/cleanup", files={"file": ("my logo.png", badge, "image/png")},
                  data={"size": "left_chest", "fabric": "tshirt"}).json()["id"]
     job = _wait(c, f"/api/cleanup/{cid}")
