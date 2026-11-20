@@ -289,7 +289,7 @@ def test_export_files_read_back_with_the_same_stitches(tmp_path):
         {"kind": "fill", "color": 1, "poly": box(40, 0, 60, 20), "area_mm2": 400.0},
     ])
     files = export.write_files(plan, tmp_path, "two_boxes")
-    assert set(files) == {"pes", "dst"}
+    assert set(files) == {"pes", "dst", "jef", "exp", "vp3", "xxx"}
     for info in files.values():
         assert info["ok"]
         assert info["stitches"] == plan["stitch_count"]

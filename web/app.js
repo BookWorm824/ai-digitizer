@@ -41,6 +41,9 @@ const state = {
   jobId: null,
   result: null,
   machine: remembered('machine', 'brother'),
+  brand: remembered('brand', ''),   // thread brand shown on the Download screen
+  edits: [],                // the user's own changes, made by clicking the preview
+  actual: false,            // preview at real size instead of fitted
   garment: GARMENT_COLORS[0],
   runToken: 0,
 };
@@ -72,7 +75,8 @@ async function waitFor(path, token, labelEl) {
 
 // ───────────────────────── moving between screens ─────────────────────────
 function go(step) {
-  for (const n of [1, 2, 3, 4]) $('#screen' + n).hidden = n !== step;
+  for (const n of [1, 2, 3, 4, 5]) $('#screen' + n).hidden = n !== step;
+  if (step !== 3) stopSim();
   document.querySelectorAll('.steps li').forEach((li) => {
     const n = Number(li.dataset.step);
     li.classList.toggle('current', n === step);
@@ -219,6 +223,7 @@ async function startCleanup() {
   state.sizeIn = null;                 // a new clean-up starts from screen 1's size again
   state.density = 0;
   state.inside = 'auto';
+  state.edits = [];
   showCleanupStage('working');
   $('#cLabel').textContent = 'Getting started…';
   $('#skipAi').hidden = state.skipAi || !(state.ai && state.ai.provider);
@@ -288,7 +293,11 @@ function showCleanup() {
     card.tabIndex = 0;
     card.setAttribute('role', 'radio');
     card.setAttribute('aria-checked', String(v.id === state.version));
-    const pick = () => { state.version = v.id; showCleanup(); };
+    const pick = () => {
+      if (state.version !== v.id) state.edits = [];
+      state.version = v.id;
+      showCleanup();
+    };
     card.addEventListener('click', pick);
     card.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
@@ -411,6 +420,7 @@ async function startJob(force) {
   form.append('colors', String(state.colors));
   form.append('density', String(state.density));
   form.append('inside', state.inside);
+  form.append('edits', JSON.stringify(state.edits));
   if (state.sizeIn) form.append('size_in', String(state.sizeIn));
   try {
     const { id } = await api('api/jobs', { method: 'POST', body: form });
@@ -481,8 +491,11 @@ function showResult() {
   $('#density').value = String(r.density);
   $('#insideRow').hidden = !r.inside.present;
   $('#insideBox').checked = r.inside.sewn;
+  $('#undoBtn').hidden = state.edits.length === 0;
+  renderThreadChips();
   draw();
   renderDownload();
+  saveProject();
 }
 
 // A one-click fix from the checks, or the size / softer-denser controls: change the setting
@@ -500,74 +513,254 @@ function shade(hex, amount) {
   return `rgb(${ch[0]},${ch[1]},${ch[2]})`;
 }
 
-// Draw every stitch as a thread-thick line, in sewing order so later thread covers earlier.
-// The picture is drawn several times larger than it is shown (at least 12 pixels per
-// millimetre) and then shrunk smoothly, so each thread stays a clean line instead of a
-// one-pixel scratch.
-function draw() {
+// ───────────────────────── the thread picture and the sew-out simulator ─────────────────────────
+// Every stitch is drawn as a thread-thick line, in sewing order so later thread covers
+// earlier. The picture is drawn several times larger than it is shown (at least 12 pixels
+// per millimetre) and then shrunk smoothly, so each thread stays a clean line.
+// `sim` remembers how far the drawing has got, so the simulator can add stitches a few at a
+// time instead of starting again for every frame.
+const sim = { big: null, g: null, s: 1, ox: 0, oy: 0, total: 0, drawn: 0, cursor: null,
+  playing: false, raf: 0, last: null };
+
+function totalStitches(r) {
+  let n = 0;
+  for (const b of r.blocks) for (const seg of b.segments) n += seg.length / 2;
+  return n;
+}
+
+function setupCanvas() {
   const r = state.result;
   const cv = $('#preview');
-  if (!r || cv.offsetParent === null) return;
-  const W = cv.parentElement.clientWidth - 20;
-  const H = Math.round(Math.max(260, Math.min(W, window.innerHeight * 0.62)));
+  const [minx, miny, maxx, maxy] = r.bounds;
   const dpr = window.devicePixelRatio || 1;
+  let W;
+  let H;
+  if (state.actual) {                       // real size: CSS millimetres, plus a margin
+    const pxPerMm = 96 / 25.4;
+    W = Math.round((maxx - minx + 12) * pxPerMm);
+    H = Math.round((maxy - miny + 12) * pxPerMm);
+  } else {
+    W = cv.parentElement.clientWidth;
+    H = Math.round(Math.max(260, Math.min(W, window.innerHeight * 0.62)));
+  }
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px';
   cv.style.height = H + 'px';
 
-  const [minx, miny, maxx, maxy] = r.bounds;
-  const pad = 18 * dpr;
+  const pad = (state.actual ? 6 * (96 / 25.4) : 18) * dpr;
   const shown = Math.min((cv.width - 2 * pad) / (maxx - minx), (cv.height - 2 * pad) / (maxy - miny));
   const k = Math.max(1, Math.min(12 / shown, 4096 / Math.max(cv.width, cv.height)));
-  const big = document.createElement('canvas');
-  big.width = Math.round(cv.width * k);
-  big.height = Math.round(cv.height * k);
-  const g = big.getContext('2d');
-  g.fillStyle = state.garment;
-  g.fillRect(0, 0, big.width, big.height);
+  sim.big = document.createElement('canvas');
+  sim.big.width = Math.round(cv.width * k);
+  sim.big.height = Math.round(cv.height * k);
+  sim.g = sim.big.getContext('2d');
+  sim.k = k;
+  sim.s = shown * k;                                     // pixels per millimetre while drawing
+  sim.ox = (sim.big.width - (maxx - minx) * sim.s) / 2 - minx * sim.s;
+  sim.oy = (sim.big.height - (maxy - miny) * sim.s) / 2 - miny * sim.s;
+  sim.total = totalStitches(r);
+  resetDrawing();
+}
 
-  const s = shown * k;                                   // pixels per millimetre while drawing
-  const ox = (big.width - (maxx - minx) * s) / 2 - minx * s;
-  const oy = (big.height - (maxy - miny) * s) / 2 - miny * s;
+function resetDrawing() {
+  sim.g.fillStyle = state.garment;
+  sim.g.fillRect(0, 0, sim.big.width, sim.big.height);
+  sim.g.lineCap = 'round';
+  sim.g.lineJoin = 'round';
+  sim.drawn = 0;
+  sim.cursor = { b: 0, sg: 0, p: 0 };
+  sim.last = null;
+}
+
+// Add stitches to the big picture until `n` of them are drawn.
+function drawTo(n) {
+  const r = state.result;
+  n = Math.max(0, Math.min(sim.total, Math.round(n)));
+  if (n < sim.drawn) resetDrawing();
+  const g = sim.g;
+  const s = sim.s;
   // Thread is about 0.4 mm but flattens and spreads when sewn, closing the gaps between
   // rows, so it is drawn a touch wider: otherwise the underlay shows through as a grid.
   const lw = 0.47 * s;
-  g.lineCap = 'round';
-  g.lineJoin = 'round';
-  for (const block of r.blocks) {
-    const dark = shade(block.hex, -0.16);
-    const light = shade(block.hex, 0.22);
-    for (const seg of block.segments) {
-      for (let i = 0; i < seg.length - 2; i += 80) {          // 40 stitches at a time
-        const end = Math.min(seg.length, i + 82);
-        g.beginPath();
-        g.moveTo(seg[i] * s + ox, seg[i + 1] * s + oy);
-        for (let j = i + 2; j < end; j += 2) g.lineTo(seg[j] * s + ox, seg[j + 1] * s + oy);
-        g.strokeStyle = dark; g.lineWidth = lw * 1.1; g.stroke();           // soft edge
-        g.strokeStyle = block.hex; g.lineWidth = lw * 0.9; g.stroke();      // the thread
-        g.globalAlpha = 0.5;
-        g.strokeStyle = light; g.lineWidth = lw * 0.28; g.stroke();         // a little sheen
-        g.globalAlpha = 1;
-      }
-    }
+  const c = sim.cursor;
+  while (sim.drawn < n && c.b < r.blocks.length) {
+    const block = r.blocks[c.b];
+    const seg = block.segments[c.sg];
+    if (!seg) { c.b += 1; c.sg = 0; c.p = 0; continue; }
+    const points = seg.length / 2;
+    if (c.p >= points) { c.sg += 1; c.p = 0; continue; }
+    const end = Math.min(points, c.p + Math.min(40, n - sim.drawn));
+    const from = Math.max(0, c.p - 1);                   // join on to the stitch before
+    g.beginPath();
+    g.moveTo(seg[from * 2] * s + sim.ox, seg[from * 2 + 1] * s + sim.oy);
+    for (let q = from + 1; q < end; q += 1) g.lineTo(seg[q * 2] * s + sim.ox, seg[q * 2 + 1] * s + sim.oy);
+    g.strokeStyle = shade(block.hex, -0.16); g.lineWidth = lw * 1.1; g.stroke();   // soft edge
+    g.strokeStyle = block.hex; g.lineWidth = lw * 0.9; g.stroke();                 // the thread
+    g.globalAlpha = 0.5;
+    g.strokeStyle = shade(block.hex, 0.22); g.lineWidth = lw * 0.28; g.stroke();   // a little sheen
+    g.globalAlpha = 1;
+    sim.drawn += end - c.p;
+    sim.last = [seg[(end - 1) * 2], seg[(end - 1) * 2 + 1]];
+    c.p = end;
   }
+}
 
-  // shrink in halves for a smooth result, then onto the screen
-  let src = big;
-  while (src.width > cv.width * 2) {
-    const half = document.createElement('canvas');
-    half.width = Math.round(src.width / 2);
-    half.height = Math.round(src.height / 2);
-    const hg = half.getContext('2d');
-    hg.imageSmoothingQuality = 'high';
-    hg.drawImage(src, 0, 0, half.width, half.height);
-    src = half;
+// Put the big picture on the screen. `fine` shrinks it in halves for the smoothest result;
+// while the simulator is playing a single quick shrink is enough.
+function show(fine, needle) {
+  const cv = $('#preview');
+  let src = sim.big;
+  if (fine) {
+    while (src.width > cv.width * 2) {
+      const half = document.createElement('canvas');
+      half.width = Math.round(src.width / 2);
+      half.height = Math.round(src.height / 2);
+      const hg = half.getContext('2d');
+      hg.imageSmoothingQuality = 'high';
+      hg.drawImage(src, 0, 0, half.width, half.height);
+      src = half;
+    }
   }
   const ctx = cv.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(src, 0, 0, cv.width, cv.height);
+  if (needle && sim.last) {                              // where the needle is right now
+    const x = (sim.last[0] * sim.s + sim.ox) / sim.k;
+    const y = (sim.last[1] * sim.s + sim.oy) / sim.k;
+    ctx.beginPath();
+    ctx.arc(x, y, 5 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#111';
+    ctx.stroke();
+  }
+}
+
+function draw() {
+  const r = state.result;
+  const cv = $('#preview');
+  if (!r || cv.offsetParent === null) return;
+  stopSim();
+  setupCanvas();
+  drawTo(sim.total);
+  show(true, false);
+  const scrub = $('#scrub');
+  scrub.max = String(sim.total);
+  scrub.value = String(sim.total);
+  drawStrip();
+}
+
+// The bar under the slider: one band per thread color, with a dark tick wherever the
+// thread is cut.
+function drawStrip() {
+  const r = state.result;
+  const cv = $('#simStrip');
+  const g = cv.getContext('2d');
+  g.clearRect(0, 0, cv.width, cv.height);
+  let at = 0;
+  for (const b of r.blocks) {
+    let n = 0;
+    for (const seg of b.segments) n += seg.length / 2;
+    g.fillStyle = b.hex;
+    g.fillRect((at / sim.total) * cv.width, 0, Math.ceil((n / sim.total) * cv.width), cv.height);
+    let inside = at;
+    b.segments.forEach((seg, i) => {
+      if (i > 0) { g.fillStyle = '#111'; g.fillRect((inside / sim.total) * cv.width, 0, 2, cv.height); }
+      inside += seg.length / 2;
+    });
+    at += n;
+    g.fillStyle = '#fff';                                // a white gap marks each color change
+    g.fillRect((at / sim.total) * cv.width - 1, 0, 2, cv.height);
+  }
+}
+
+function stopSim() {
+  if (sim.raf) cancelAnimationFrame(sim.raf);
+  sim.raf = 0;
+  sim.playing = false;
+  const b = $('#playBtn');
+  if (b) b.textContent = '▶ Watch it sew';
+}
+
+function playSim() {
+  if (!state.result) return;
+  if (sim.playing) { stopSim(); show(true, true); return; }
+  if (sim.drawn >= sim.total) drawTo(0);
+  sim.playing = true;
+  $('#playBtn').textContent = '❚❚ Pause';
+  const perFrame = Math.max(2, sim.total / (14 * 60));    // the whole design in about 14 s
+  const step = () => {
+    drawTo(sim.drawn + perFrame);
+    $('#scrub').value = String(sim.drawn);
+    if (sim.drawn >= sim.total) { stopSim(); show(true, false); return; }
+    show(false, true);
+    sim.raf = requestAnimationFrame(step);
+  };
+  sim.raf = requestAnimationFrame(step);
+}
+
+// ───────────────────────── clicking the design to change it ─────────────────────────
+function areaAt(clientX, clientY) {
+  const r = state.result;
+  const cv = $('#preview');
+  const box = cv.getBoundingClientRect();
+  const dpr = cv.width / box.width;
+  const x = (((clientX - box.left) * dpr) * sim.k - sim.ox) / sim.s;     // millimetres
+  const y = (((clientY - box.top) * dpr) * sim.k - sim.oy) / sim.s;
+  let best = null;
+  for (const a of r.areas) {
+    const ring = a.ring;
+    let inside = false;
+    for (let i = 0, j = ring.length - 2; i < ring.length; j = i, i += 2) {
+      const xi = ring[i]; const yi = ring[i + 1]; const xj = ring[j]; const yj = ring[j + 1];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    if (inside && (!best || a.area < best.area)) best = a;
+  }
+  return best ? { area: best, at: [x / r.ref, y / r.ref] } : null;
+}
+
+let picked = null;
+
+function closeAreaMenu() {
+  $('#areaMenu').hidden = true;
+  picked = null;
+}
+
+function addEdit(edit) {
+  state.edits.push(edit);
+  closeAreaMenu();
+  startJob(true);
+}
+
+function renderThreadChips() {
+  const box = $('#threadChips');
+  box.innerHTML = '';
+  for (const c of state.result.colors) {
+    if (c.label) continue;                               // the towel's flattening layer
+    const b = el('button');
+    b.type = 'button';
+    const chip = el('span', 'chip');
+    chip.style.background = c.hex;
+    b.append(chip, el('span', '', threadName(c) || c.hex));
+    b.setAttribute('aria-label', 'Change this thread color');
+    b.addEventListener('click', () => {
+      const picker = $('#chipPicker');
+      picker.value = c.hex;
+      picker.onchange = () => addEdit({ type: 'recolor', from: c.hex, hex: picker.value });
+      picker.click();
+    });
+    box.append(b);
+  }
+}
+
+function threadName(c) {
+  const t = c.threads && c.threads[state.brand];
+  return t ? `${t.brand} ${t.label}`.trim() : '';
 }
 
 function setupScreen3() {
@@ -581,6 +774,7 @@ function setupScreen3() {
     b.classList.toggle('on', c === state.garment);
     b.addEventListener('click', () => {
       state.garment = c;
+      renderDownload();
       box.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
       draw();
     });
@@ -606,6 +800,43 @@ function setupScreen3() {
   $('#failBack').addEventListener('click', () => { state.runToken++; go(2); showCleanup(); });
   $('#next3').addEventListener('click', () => go(4));
   window.addEventListener('resize', draw);
+  $('#playBtn').addEventListener('click', playSim);
+  $('#scrub').addEventListener('input', (e) => {
+    stopSim();
+    drawTo(Number(e.target.value));
+    show(false, Number(e.target.value) < sim.total);
+  });
+  $('#scrub').addEventListener('change', (e) => show(true, Number(e.target.value) < sim.total));
+  $('#actualBtn').addEventListener('click', () => {
+    state.actual = !state.actual;
+    $('#actualBtn').textContent = state.actual ? 'Fit to screen' : 'Actual size';
+    $('#stage').classList.toggle('actual', state.actual);
+    draw();
+  });
+  $('#undoBtn').addEventListener('click', () => { state.edits.pop(); startJob(true); });
+  $('#preview').addEventListener('click', (e) => {
+    if (!state.result || sim.playing) return;
+    const hit = areaAt(e.clientX, e.clientY);
+    if (!hit) { closeAreaMenu(); return; }
+    picked = hit;
+    const menu = $('#areaMenu');
+    const stage = $('#stage').getBoundingClientRect();
+    menu.hidden = false;
+    $('#areaOutline').hidden = hit.area.kind === 'run';
+    menu.style.left = Math.max(4, Math.min(e.clientX - stage.left + $('#stage').scrollLeft, stage.width - 190)) + 'px';
+    menu.style.top = Math.max(4, Math.min(e.clientY - stage.top - 20, stage.height - menu.offsetHeight - 4)) + $('#stage').scrollTop + 'px';
+  });
+  $('#areaCancel').addEventListener('click', closeAreaMenu);
+  $('#areaDelete').addEventListener('click', () => picked && addEdit({ type: 'delete', at: picked.at }));
+  $('#areaOutline').addEventListener('click', () => picked && addEdit({ type: 'outline', at: picked.at }));
+  $('#areaColor').addEventListener('click', () => {
+    if (!picked) return;
+    const picker = $('#areaPicker');
+    const at = picked.at;
+    picker.value = picked.area.hex;
+    picker.onchange = () => addEdit({ type: 'color', at, hex: picker.value });
+    picker.click();
+  });
 }
 
 // ───────────────────────── screen 4: download ─────────────────────────
@@ -619,6 +850,20 @@ function renderDownload() {
   const machine = state.options.machines.find((m) => m.id === state.machine) || state.options.machines[0];
   const fmt = machine.format;
   const file = r.files[fmt];
+  const sel = $('#brandSelect');
+  if (!sel.options.length) {
+    for (const b of state.options.thread_brands) {
+      const o = el('option', '', b.line);
+      o.value = b.id;
+      sel.append(o);
+    }
+  }
+  sel.value = state.brand;
+  const q = `brand=${encodeURIComponent(state.brand)}&machine=${encodeURIComponent(state.machine)}` +
+    `&color=${encodeURIComponent(state.garment.slice(1))}`;
+  $('#worksheetBtn').href = `api/jobs/${state.jobId}/worksheet.pdf?${q}`;
+  $('#mockupBtn').href = `api/jobs/${state.jobId}/mockup.png?${q}&download=true`;
+  $('#zipBtn').href = `api/jobs/${state.jobId}/all.zip?${q}`;
   const btn = $('#downloadBtn');
   if (file && file.ok) {
     btn.href = `api/jobs/${state.jobId}/download/${fmt}`;
@@ -651,13 +896,22 @@ function renderDownload() {
     const li = el('li');
     const chip = el('span', 'chip');
     chip.style.background = c.hex;
-    li.append(chip, el('span', '', c.label || `Color ${i + 1}`), el('small', '', `${c.stitches.toLocaleString()} stitches`));
+    const name = el('span');
+    name.append(c.label || `Color ${i + 1}`);
+    if (!c.label && threadName(c)) name.append(el('em', '', threadName(c)));
+    li.append(chip, name, el('small', '', `${c.stitches.toLocaleString()} stitches`));
     ol.appendChild(li);
   });
 }
 
 function setupScreen4() {
   $('#back4').addEventListener('click', () => go(3));
+  $('#brandSelect').addEventListener('change', (e) => {
+    state.brand = e.target.value;
+    remember('brand', state.brand);
+    renderDownload();
+    renderThreadChips();
+  });
   $('#again').addEventListener('click', () => {
     state.runToken++;
     state.result = null;
@@ -669,6 +923,82 @@ function setupScreen4() {
     $('#next1').disabled = true;
     go(1);
   });
+}
+
+// ───────────────────────── my projects ─────────────────────────
+// Every stitched design is saved automatically, with the choices made, so it can be reopened.
+async function saveProject() {
+  if (!state.cleanupId || !state.jobId) return;
+  const form = new FormData();
+  form.append('cleanup_id', state.cleanupId);
+  form.append('job_id', state.jobId);
+  form.append('settings_json', JSON.stringify({
+    version: state.version, colors: state.colors, sizeIn: state.sizeIn, density: state.density,
+    inside: state.inside, edits: state.edits, garment: state.garment,
+  }));
+  try { await api('api/projects', { method: 'POST', body: form }); } catch { /* saving is a bonus */ }
+}
+
+async function showProjects() {
+  state.runToken++;
+  go(5);
+  const grid = $('#projectGrid');
+  grid.innerHTML = '';
+  let list = [];
+  try { list = (await api('api/projects')).projects; } catch { /* shown as empty */ }
+  $('#noProjects').hidden = list.length > 0;
+  for (const pr of list) {
+    const card = el('div', 'project');
+    const img = el('img');
+    img.src = `api/projects/${pr.id}/thumb.png?t=${Date.now()}`;
+    img.alt = '';
+    const sum = pr.summary || {};
+    const when = new Date(pr.saved).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    card.append(img, el('strong', '', pr.name),
+      el('p', '', `${sum.size_in || '?'} in · ${sum.colors || '?'} colors · ${(sum.stitches || 0).toLocaleString()} stitches`),
+      el('p', '', when));
+    const row = el('div', 'row');
+    const open = el('button', '', 'Open');
+    open.type = 'button';
+    open.addEventListener('click', () => openProject(pr.id));
+    const del = el('button', '', 'Delete');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      if (!window.confirm(`Delete "${pr.name}"? This can't be undone.`)) return;
+      try { await api(`api/projects/${pr.id}`, { method: 'DELETE' }); } catch { /* list refresh shows the truth */ }
+      showProjects();
+    });
+    row.append(open, del);
+    card.append(row);
+    grid.append(card);
+  }
+}
+
+async function openProject(id) {
+  try {
+    const pr = await api(`api/projects/${id}/open`, { method: 'POST' });
+    const st = pr.settings || {};
+    state.runToken++;
+    state.file = null;
+    state.cleanupId = pr.cleanup_id;
+    state.cleanup = pr.result;
+    state.cleanupFor = 'project';
+    state.imageStamp = Date.now();
+    state.fabric = pr.fabric || state.fabric;
+    state.version = st.version || pr.result.default;
+    state.colors = st.colors || state.maxColors;
+    state.sizeIn = st.sizeIn || null;
+    state.density = st.density || 0;
+    state.inside = st.inside || 'auto';
+    state.edits = Array.isArray(st.edits) ? st.edits : [];
+    state.garment = st.garment || state.garment;
+    state.result = null;
+    state.stitchedFor = null;
+    if (pr.result.spend) state.ai = pr.result.spend;
+    startJob(true);
+  } catch (err) {
+    window.alert(err.message);
+  }
 }
 
 // ───────────────────────── settings ─────────────────────────
@@ -764,6 +1094,8 @@ async function init() {
   setupScreen3();
   setupScreen4();
   setupSettings();
+  $('#projectsBtn').addEventListener('click', showProjects);
+  $('#back5').addEventListener('click', () => go(state.result ? 3 : 1));
   try {
     state.options = await api('api/options');
     state.ai = await api('api/settings');
@@ -774,6 +1106,7 @@ async function init() {
   state.maxColors = state.options.max_colors;
   state.colors = state.maxColors;
   if (!state.options.machines.some((m) => m.id === state.machine)) state.machine = state.options.machines[0].id;
+  if (!state.options.thread_brands.some((b) => b.id === state.brand)) state.brand = state.options.thread_brands[0].id;
   renderChoices();
   renderAiLine();
 }

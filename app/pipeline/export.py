@@ -16,7 +16,7 @@ from pyembroidery import COLOR_CHANGE, END, JUMP, STITCH, TRIM, EmbPattern, EmbT
 from .common import canvas_for, save_debug
 
 UNITS_PER_MM = 10.0          # embroidery files count in tenths of a millimetre
-FORMATS = ("pes", "dst")
+FORMATS = ("pes", "dst", "jef", "exp", "vp3", "xxx")
 
 
 def build_pattern(plan: dict) -> EmbPattern:

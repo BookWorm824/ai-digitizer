@@ -180,3 +180,42 @@ dialog::backdrop { background: rgba(20,24,34,.45); }
 
 label.check { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); cursor: pointer; }
 label.check input { width: 22px; height: 22px; flex: none; }
+
+/* ───────────── Phase 4: editing, simulator, downloads, projects ───────────── */
+.headButtons { display: flex; gap: 8px; }
+.stage { position: relative; border-radius: 8px; }
+.stage.actual { overflow: auto; max-height: 75vh; }
+#preview { cursor: pointer; }
+.areaMenu {
+  position: absolute; z-index: 5; display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.25); min-width: 170px;
+}
+.areaMenu button { min-height: 40px; padding: 8px 12px; text-align: left; }
+.simRow { display: flex; align-items: center; gap: 12px; padding: 10px 4px 0; }
+.simRow button { min-height: 42px; padding: 8px 14px; white-space: nowrap; }
+.simBar { flex: 1; min-width: 0; }
+.simBar input { width: 100%; margin: 0; display: block; }
+#simStrip { display: block; width: 100%; height: 10px; border-radius: 5px; margin-top: 4px; }
+.toolRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.toolRow .swatches { flex: 1; }
+.threadChips { display: grid; gap: 6px; margin: 8px 0 2px; }
+.threadChips button { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 10px; text-align: left; font-size: 15px; }
+.threadChips .chip, .threadOrder .chip { width: 26px; height: 26px; border-radius: 6px; border: 1px solid rgba(0,0,0,.25); flex: none; }
+.extras { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 18px 0 6px; }
+a.btn {
+  display: inline-block; text-decoration: none; color: var(--ink); background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; min-height: 48px;
+}
+a.btn:hover { border-color: var(--accent); }
+.brandRow { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.brandRow select { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.threadOrder li > span:nth-child(2) { display: flex; flex-direction: column; line-height: 1.25; }
+.threadOrder li em { font-style: normal; color: var(--muted); font-size: 14px; }
+.projectGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
+.project { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.project img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #eeece6; border-radius: 8px; }
+.project strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project p { margin: 0; color: var(--muted); font-size: 14.5px; }
+.project .row { display: flex; gap: 8px; margin-top: 4px; }
+.project .row button { flex: 1; min-height: 40px; padding: 6px 10px; }

@@ -1,4 +1,32 @@
 [
-  {"id": "brother", "name": "Brother / Baby Lock", "format": "pes"},
-  {"id": "tajima", "name": "Tajima and most commercial machines", "format": "dst"}
+  {
+    "id": "brother",
+    "name": "Brother / Baby Lock",
+    "format": "pes"
+  },
+  {
+    "id": "tajima",
+    "name": "Tajima and most commercial machines",
+    "format": "dst"
+  },
+  {
+    "id": "janome",
+    "name": "Janome",
+    "format": "jef"
+  },
+  {
+    "id": "melco",
+    "name": "Melco / Bernina",
+    "format": "exp"
+  },
+  {
+    "id": "husqvarna",
+    "name": "Husqvarna Viking / Pfaff",
+    "format": "vp3"
+  },
+  {
+    "id": "singer",
+    "name": "Singer",
+    "format": "xxx"
+  }
 ]

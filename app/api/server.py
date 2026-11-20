@@ -7,18 +7,21 @@ download. Slow work runs on background threads so the screen can show progress i
 
 from __future__ import annotations
 
+import io
+import json
 import logging
 import re
 import threading
 import traceback
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, ai, chatgpt, cleanup, config, settings
+from .. import __version__, ai, chatgpt, cleanup, config, projects, settings, threads, worksheet
 from ..pipeline import PipelineError, run_pipeline
 
 MAX_UPLOAD = 40 * 1024 * 1024
@@ -95,6 +98,7 @@ def options():
         "fabrics": [{"id": f["id"], "name": f["name"], "more": bool(f.get("more"))}
                     for f in config.fabrics().values()],
         "machines": config.machines(),
+        "thread_brands": threads.brands(),
         "max_colors": config.RULES["max_colors"],
     }
 
@@ -233,7 +237,8 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                      colors: int = Form(6), file: UploadFile | None = File(None),
                      size: str = Form("left_chest"), custom_in: float | None = Form(None),
                      fabric: str = Form("tshirt"), size_in: float | None = Form(None),
-                     density: int = Form(0), inside: str = Form("auto")):
+                     density: int = Form(0), inside: str = Form("auto"),
+                     edits: str = Form("[]")):
     """Digitize either a version chosen on the Clean up screen (cleanup_id + version), or a
     picture uploaded directly (file + size + fabric)."""
     if cleanup_id:
@@ -250,6 +255,12 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
     else:
         raise HTTPException(400, "Please choose a picture first.")
 
+    try:
+        edit_list = json.loads(edits or "[]")
+        if not isinstance(edit_list, list):
+            edit_list = []
+    except ValueError:
+        edit_list = []
     job_id = uuid.uuid4().hex[:12]
     job = {"status": "working", "label": "Getting started…"}
     with _lock:
@@ -264,7 +275,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
         result = run_pipeline(get_data(say), config.data_dir() / "jobs" / job_id, name,
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
                               max_colors=colors, density=density, hints=hints, inside=inside,
-                              progress=say)
+                              edits=edit_list, progress=say)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")
         job["result"] = result
@@ -298,6 +309,122 @@ def preview(job_id: str):
     if job is None or job.get("status") != "done":
         raise HTTPException(404, "That picture isn't ready.")
     return FileResponse(job["paths"]["preview"], media_type="image/png")
+
+
+def _done_job(job_id: str) -> dict:
+    job = JOBS.get(job_id)
+    if job is None or job.get("status") != "done":
+        raise HTTPException(404, "That design isn't ready. Please make it again.")
+    return job
+
+
+def _machine_name(machine: str) -> str:
+    return next((m["name"] for m in config.machines() if m["id"] == machine), "")
+
+
+def _worksheet(job: dict, brand: str, machine: str) -> bytes:
+    fmt = next((m["format"] for m in config.machines() if m["id"] == machine), "")
+    name = f"{job['result']['name']}.{fmt}" if fmt else ""
+    return worksheet.build_pdf(job["result"], Path(job["paths"]["preview"]), brand,
+                               _machine_name(machine), name)
+
+
+@app.get("/api/jobs/{job_id}/worksheet.pdf")
+def worksheet_pdf(job_id: str, brand: str = threads.DEFAULT_BRAND, machine: str = ""):
+    job = _done_job(job_id)
+    name = f"{job['result']['name']} worksheet.pdf"
+    return Response(_worksheet(job, brand, machine), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/jobs/{job_id}/mockup.png")
+def mockup_png(job_id: str, color: str = "eeece6", download: bool = False):
+    job = _done_job(job_id)
+    data = worksheet.build_mockup(job["result"], color)
+    headers = {"Cache-Control": "no-store"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{job["result"]["name"]} mockup.png"'
+    return Response(data, media_type="image/png", headers=headers)
+
+
+@app.get("/api/jobs/{job_id}/all.zip")
+def all_files(job_id: str, brand: str = threads.DEFAULT_BRAND, machine: str = "",
+              color: str = "eeece6"):
+    """Every machine format that passed its check, plus the worksheet and the pictures."""
+    job = _done_job(job_id)
+    name = job["result"]["name"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for fmt, info in job["result"]["files"].items():
+            if info["ok"]:
+                z.write(job["paths"][fmt], f"{name}.{fmt}")
+        z.writestr(f"{name} worksheet.pdf", _worksheet(job, brand, machine))
+        z.write(job["paths"]["preview"], f"{name} preview.png")
+        z.writestr(f"{name} mockup.png", worksheet.build_mockup(job["result"], color))
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name} - all files.zip"'})
+
+
+# ------------------------------------------------------------------------------ projects
+
+@app.get("/api/projects")
+def list_projects():
+    return {"projects": projects.list_all()}
+
+
+@app.post("/api/projects")
+def save_project(cleanup_id: str = Form(...), job_id: str = Form(...),
+                 settings_json: str = Form("{}")):
+    """Save (or update) the project for this design. Called automatically by the screens."""
+    src = _cleanup(cleanup_id)
+    job = _done_job(job_id)
+    try:
+        chosen = json.loads(settings_json)
+    except ValueError:
+        chosen = {}
+    pid = src.setdefault("project_id", cleanup_id)
+    r = job["result"]
+    summary = {"size_in": r["stats"]["size_in"], "stitches": r["stats"]["stitches"],
+               "colors": r["stats"]["colors"], "status": r["check"]["status"]}
+    return projects.save(pid, src["name"], src["dir"], src["result"], src["fit"], src["fabric"],
+                         chosen, summary, Path(job["paths"]["preview"]))
+
+
+@app.get("/api/projects/{pid}/thumb.png")
+def project_thumb(pid: str):
+    try:
+        path = projects.thumb(pid)
+    except KeyError:
+        raise HTTPException(404, "That project isn't here any more.")
+    if not path.exists():
+        raise HTTPException(404, "That project has no picture.")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/projects/{pid}/open")
+def open_project(pid: str):
+    """Reopen a saved project as a live design, ready to change and stitch again."""
+    try:
+        meta = projects.load(pid)
+    except (KeyError, OSError, ValueError):
+        raise HTTPException(404, "That project isn't here any more.")
+    cid = uuid.uuid4().hex[:12]
+    result = dict(meta["cleanup"], spend=ai.status())
+    with _lock:
+        CLEANUPS[cid] = {"status": "done", "label": "", "name": meta["name"],
+                         "dir": projects.files_dir(pid), "fit": tuple(meta["fit"]),
+                         "fabric": meta["fabric"], "result": result, "project_id": pid}
+    return {"cleanup_id": cid, "name": meta["name"], "result": result,
+            "settings": meta.get("settings", {}), "fabric": meta["fabric"]}
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    try:
+        projects.delete(pid)
+    except KeyError:
+        raise HTTPException(404, "That project isn't here any more.")
+    return {"ok": True}
 
 
 @app.exception_handler(HTTPException)

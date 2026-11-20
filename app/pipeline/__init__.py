@@ -10,9 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from .. import config
-from . import (analyze, classify, clean, export, intake, optimize, sequence, stitch, validate,
-               vectorize)
+from .. import config, threads
+from . import (analyze, classify, clean, edits as edits_stage, export, intake, optimize, sequence,
+               stitch, validate, vectorize)
 from .common import PipelineError, hex_of
 
 __all__ = ["run_pipeline", "PipelineError"]
@@ -34,6 +34,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  fit_w_mm: float = 88.9, fit_h_mm: float = 88.9, fabric_id: str = "tshirt",
                  max_colors: int | None = None, overrides: dict | None = None,
                  density: int = 0, hints: dict | None = None, inside: str = "auto",
+                 edits: list | None = None,
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
@@ -58,13 +59,21 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
     vec = vectorize.run(cleaned, fit_w_mm, fit_h_mm, rules, debug_dir)
     say("classify")
     classified = classify.run(vec, rules, debug_dir)
+    palette = list(cleaned["palette"])
+    bx0, by0, bx1, by1 = vec["bounds"]
+    ref = max(bx1 - bx0, by1 - by0)         # what click positions are fractions of
+    applied = 0
+    if edits:                               # the user's own changes, made on the preview
+        classified, palette, applied = edits_stage.apply(classified, palette, edits, ref)
+        if not classified["objects"]:
+            raise PipelineError("There is nothing left to stitch. Undo your last change.")
     say("stitch")
     stitched = stitch.run(classified, rules, debug_dir)
     if not stitched["objects"]:
         raise PipelineError(
             "Everything in this picture is too small to stitch at this size. Try a bigger size.")
     say("sequence")
-    plan = sequence.run(stitched, cleaned["palette"], rules, classified["order"], debug_dir)
+    plan = sequence.run(stitched, palette, rules, classified["order"], debug_dir)
     say("validate")
     check = validate.run(plan, stitched, classified, fabric, config.hoops(), rules,
                          dict(hints or {}, density=density), debug_dir)
@@ -101,7 +110,11 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         "fabric": {"id": fabric["id"], "name": fabric["name"], "stabilizer": fabric["stabilizer"],
                    "notes": fabric.get("notes", [])},
         "colors": [{"hex": hex_of(b["rgb"]), "label": b.get("label"),
+                    "threads": None if b.get("label") else threads.match_all(b["rgb"]),
                     "stitches": sum(len(s) for s in b["segments"])} for b in plan["blocks"]],
+        "areas": edits_stage.areas(classified["objects"], palette),
+        "ref": round(ref, 3),
+        "edits_applied": applied,
         "blocks": [{"hex": hex_of(b["rgb"]),
                     "segments": [[round(v, 2) for p in sg for v in p] for sg in b["segments"]]}
                    for b in plan["blocks"]],

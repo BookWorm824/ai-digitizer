@@ -18,7 +18,10 @@
       <li data-step="3">3 · Stitches</li>
       <li data-step="4">4 · Download</li>
     </ol>
-    <button id="settingsBtn" type="button" class="quiet">Settings</button>
+    <div class="headButtons">
+      <button id="projectsBtn" type="button" class="quiet">My projects</button>
+      <button id="settingsBtn" type="button" class="quiet">Settings</button>
+    </div>
   </header>
 
   <main>
@@ -103,8 +106,30 @@
 
       <div id="ready" class="ready" hidden>
         <div class="previewBox">
-          <canvas id="preview"></canvas>
-          <div class="swatches" id="garmentColors" aria-label="Garment color"></div>
+          <div id="stage" class="stage">
+            <canvas id="preview"></canvas>
+            <div id="areaMenu" class="areaMenu" hidden>
+              <strong>This part</strong>
+              <button id="areaColor" type="button">Change color</button>
+              <button id="areaOutline" type="button">Outline only</button>
+              <button id="areaDelete" type="button">Delete</button>
+              <button id="areaCancel" type="button" class="link">Cancel</button>
+              <input id="areaPicker" type="color" hidden>
+            </div>
+          </div>
+          <div class="simRow">
+            <button id="playBtn" type="button" aria-label="Play the sewing order">▶ Watch it sew</button>
+            <div class="simBar">
+              <input id="scrub" type="range" min="0" max="100" value="100" aria-label="Sewing progress">
+              <canvas id="simStrip" width="1000" height="10" aria-hidden="true"></canvas>
+            </div>
+          </div>
+          <p class="hint">Click any part of the design to change its color, make it outline-only, or delete it.</p>
+          <div class="toolRow">
+            <div class="swatches" id="garmentColors" aria-label="Garment color"></div>
+            <button id="actualBtn" type="button" class="quiet">Actual size</button>
+            <button id="undoBtn" type="button" class="quiet" hidden>Undo last change</button>
+          </div>
         </div>
         <aside>
           <div id="light" class="light"><span class="dot"></span><strong id="lightText"></strong></div>
@@ -126,7 +151,9 @@
               <button id="more" type="button" aria-label="More colors">+</button>
             </div>
           </div>
-          <p class="hint">Fewer colors sew faster.</p>
+          <p class="hint">Fewer colors sew faster. Click a color below to change it.</p>
+          <div id="threadChips" class="threadChips"></div>
+          <input id="chipPicker" type="color" hidden>
           <label id="insideRow" class="check" hidden>
             <input id="insideBox" type="checkbox">
             <span>Sew the blank areas inside the design</span>
@@ -155,16 +182,37 @@
       <div class="downloadBox">
         <a id="downloadBtn" class="primary big" href="#" download>Download</a>
         <p id="downloadNote" class="hint"></p>
+        <div class="extras">
+          <a id="worksheetBtn" class="btn" href="#" download>Worksheet (PDF)</a>
+          <a id="mockupBtn" class="btn" href="#" download>Picture on the garment</a>
+          <a id="zipBtn" class="btn" href="#" download>Everything in one zip</a>
+        </div>
+        <p class="hint">Saved to My projects automatically, so you can reopen and change it later.</p>
       </div>
 
       <h2>Before you sew</h2>
       <ul id="sewNotes" class="sewNotes"></ul>
       <h2>Thread order</h2>
+      <label class="brandRow">Thread brand:
+        <select id="brandSelect"></select>
+      </label>
       <ol id="threadOrder" class="threadOrder"></ol>
+      <p class="hint">These are the closest thread colors on screen. Check them against a real thread card.</p>
 
       <div class="actions">
         <button id="back4" type="button">Back</button>
         <button id="again" type="button">Start another</button>
+      </div>
+    </section>
+
+    <!-- ───────────── My projects ───────────── -->
+    <section id="screen5" hidden>
+      <h2 class="top">My projects</h2>
+      <p id="noProjects" class="hint" hidden>Nothing saved yet. Every design you stitch is saved here automatically.</p>
+      <div id="projectGrid" class="projectGrid"></div>
+      <div class="actions">
+        <button id="back5" type="button">Back</button>
+        <span></span>
       </div>
     </section>
   </main>

@@ -1,0 +1,584 @@
+{
+ "id": "brother",
+ "brand": "Brother",
+ "line": "Brother embroidery thread",
+ "source": "The Brother thread colors built into pyembroidery (MIT licence). Names only: Brother's own thread numbers are not in this list.",
+ "threads": [
+  {
+   "number": "",
+   "name": "Prussian Blue",
+   "rgb": [
+    14,
+    31,
+    124
+   ]
+  },
+  {
+   "number": "",
+   "name": "Blue",
+   "rgb": [
+    10,
+    85,
+    163
+   ]
+  },
+  {
+   "number": "",
+   "name": "Teal Green",
+   "rgb": [
+    0,
+    135,
+    119
+   ]
+  },
+  {
+   "number": "",
+   "name": "Cornflower Blue",
+   "rgb": [
+    75,
+    107,
+    175
+   ]
+  },
+  {
+   "number": "",
+   "name": "Red",
+   "rgb": [
+    237,
+    23,
+    31
+   ]
+  },
+  {
+   "number": "",
+   "name": "Reddish Brown",
+   "rgb": [
+    209,
+    92,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Magenta",
+   "rgb": [
+    145,
+    54,
+    151
+   ]
+  },
+  {
+   "number": "",
+   "name": "Light Lilac",
+   "rgb": [
+    228,
+    154,
+    203
+   ]
+  },
+  {
+   "number": "",
+   "name": "Lilac",
+   "rgb": [
+    145,
+    95,
+    172
+   ]
+  },
+  {
+   "number": "",
+   "name": "Mint Green",
+   "rgb": [
+    158,
+    214,
+    125
+   ]
+  },
+  {
+   "number": "",
+   "name": "Deep Gold",
+   "rgb": [
+    232,
+    169,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Orange",
+   "rgb": [
+    254,
+    186,
+    53
+   ]
+  },
+  {
+   "number": "",
+   "name": "Yellow",
+   "rgb": [
+    255,
+    255,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Lime Green",
+   "rgb": [
+    112,
+    188,
+    31
+   ]
+  },
+  {
+   "number": "",
+   "name": "Brass",
+   "rgb": [
+    186,
+    152,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Silver",
+   "rgb": [
+    168,
+    168,
+    168
+   ]
+  },
+  {
+   "number": "",
+   "name": "Russet Brown",
+   "rgb": [
+    125,
+    111,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Cream Brown",
+   "rgb": [
+    255,
+    255,
+    179
+   ]
+  },
+  {
+   "number": "",
+   "name": "Pewter",
+   "rgb": [
+    79,
+    85,
+    86
+   ]
+  },
+  {
+   "number": "",
+   "name": "Black",
+   "rgb": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Ultramarine",
+   "rgb": [
+    11,
+    61,
+    145
+   ]
+  },
+  {
+   "number": "",
+   "name": "Royal Purple",
+   "rgb": [
+    119,
+    1,
+    118
+   ]
+  },
+  {
+   "number": "",
+   "name": "Dark Gray",
+   "rgb": [
+    41,
+    49,
+    51
+   ]
+  },
+  {
+   "number": "",
+   "name": "Dark Brown",
+   "rgb": [
+    42,
+    19,
+    1
+   ]
+  },
+  {
+   "number": "",
+   "name": "Deep Rose",
+   "rgb": [
+    246,
+    74,
+    138
+   ]
+  },
+  {
+   "number": "",
+   "name": "Light Brown",
+   "rgb": [
+    178,
+    118,
+    36
+   ]
+  },
+  {
+   "number": "",
+   "name": "Salmon Pink",
+   "rgb": [
+    252,
+    187,
+    197
+   ]
+  },
+  {
+   "number": "",
+   "name": "Vermilion",
+   "rgb": [
+    254,
+    55,
+    15
+   ]
+  },
+  {
+   "number": "",
+   "name": "White",
+   "rgb": [
+    240,
+    240,
+    240
+   ]
+  },
+  {
+   "number": "",
+   "name": "Violet",
+   "rgb": [
+    106,
+    28,
+    138
+   ]
+  },
+  {
+   "number": "",
+   "name": "Seacrest",
+   "rgb": [
+    168,
+    221,
+    196
+   ]
+  },
+  {
+   "number": "",
+   "name": "Sky Blue",
+   "rgb": [
+    37,
+    132,
+    187
+   ]
+  },
+  {
+   "number": "",
+   "name": "Pumpkin",
+   "rgb": [
+    254,
+    179,
+    67
+   ]
+  },
+  {
+   "number": "",
+   "name": "Cream Yellow",
+   "rgb": [
+    255,
+    243,
+    107
+   ]
+  },
+  {
+   "number": "",
+   "name": "Khaki",
+   "rgb": [
+    208,
+    166,
+    96
+   ]
+  },
+  {
+   "number": "",
+   "name": "Clay Brown",
+   "rgb": [
+    209,
+    84,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Leaf Green",
+   "rgb": [
+    102,
+    186,
+    73
+   ]
+  },
+  {
+   "number": "",
+   "name": "Peacock Blue",
+   "rgb": [
+    19,
+    74,
+    70
+   ]
+  },
+  {
+   "number": "",
+   "name": "Gray",
+   "rgb": [
+    135,
+    135,
+    135
+   ]
+  },
+  {
+   "number": "",
+   "name": "Warm Gray",
+   "rgb": [
+    216,
+    204,
+    198
+   ]
+  },
+  {
+   "number": "",
+   "name": "Dark Olive",
+   "rgb": [
+    67,
+    86,
+    7
+   ]
+  },
+  {
+   "number": "",
+   "name": "Flesh Pink",
+   "rgb": [
+    253,
+    217,
+    222
+   ]
+  },
+  {
+   "number": "",
+   "name": "Pink",
+   "rgb": [
+    249,
+    147,
+    188
+   ]
+  },
+  {
+   "number": "",
+   "name": "Deep Green",
+   "rgb": [
+    0,
+    56,
+    34
+   ]
+  },
+  {
+   "number": "",
+   "name": "Lavender",
+   "rgb": [
+    178,
+    175,
+    212
+   ]
+  },
+  {
+   "number": "",
+   "name": "Wisteria Violet",
+   "rgb": [
+    104,
+    106,
+    176
+   ]
+  },
+  {
+   "number": "",
+   "name": "Beige",
+   "rgb": [
+    239,
+    227,
+    185
+   ]
+  },
+  {
+   "number": "",
+   "name": "Carmine",
+   "rgb": [
+    247,
+    56,
+    102
+   ]
+  },
+  {
+   "number": "",
+   "name": "Amber Red",
+   "rgb": [
+    181,
+    75,
+    100
+   ]
+  },
+  {
+   "number": "",
+   "name": "Olive Green",
+   "rgb": [
+    19,
+    43,
+    26
+   ]
+  },
+  {
+   "number": "",
+   "name": "Dark Fuchsia",
+   "rgb": [
+    199,
+    1,
+    86
+   ]
+  },
+  {
+   "number": "",
+   "name": "Tangerine",
+   "rgb": [
+    254,
+    158,
+    50
+   ]
+  },
+  {
+   "number": "",
+   "name": "Light Blue",
+   "rgb": [
+    168,
+    222,
+    235
+   ]
+  },
+  {
+   "number": "",
+   "name": "Emerald Green",
+   "rgb": [
+    0,
+    103,
+    62
+   ]
+  },
+  {
+   "number": "",
+   "name": "Purple",
+   "rgb": [
+    78,
+    41,
+    144
+   ]
+  },
+  {
+   "number": "",
+   "name": "Moss Green",
+   "rgb": [
+    47,
+    126,
+    32
+   ]
+  },
+  {
+   "number": "",
+   "name": "Flesh Pink",
+   "rgb": [
+    255,
+    204,
+    204
+   ]
+  },
+  {
+   "number": "",
+   "name": "Harvest Gold",
+   "rgb": [
+    255,
+    217,
+    17
+   ]
+  },
+  {
+   "number": "",
+   "name": "Electric Blue",
+   "rgb": [
+    9,
+    91,
+    166
+   ]
+  },
+  {
+   "number": "",
+   "name": "Lemon Yellow",
+   "rgb": [
+    240,
+    249,
+    112
+   ]
+  },
+  {
+   "number": "",
+   "name": "Fresh Green",
+   "rgb": [
+    227,
+    243,
+    91
+   ]
+  },
+  {
+   "number": "",
+   "name": "Orange",
+   "rgb": [
+    255,
+    153,
+    0
+   ]
+  },
+  {
+   "number": "",
+   "name": "Cream Yellow",
+   "rgb": [
+    255,
+    240,
+    141
+   ]
+  },
+  {
+   "number": "",
+   "name": "Applique",
+   "rgb": [
+    255,
+    200,
+    200
+   ]
+  }
+ ]
+}
