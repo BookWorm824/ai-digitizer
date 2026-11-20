@@ -41,13 +41,22 @@ def _save_ctx(job_dir: Path, ctx: dict) -> None:
     (job_dir / "ctx.json").write_text(json.dumps(ctx, indent=2), encoding="utf-8")
 
 
-def _pick_default(versions: list[dict]) -> str:
-    """Pressing Next without choosing must still give a good file: the first AI version whose
-    text is right, otherwise the local clean-up."""
-    for v in versions:
-        if v["kind"] == "ai" and not v["text_warning"]:
-            return v["id"]
-    return "local"
+def _pick_default(versions: list[dict], prefer: str | None = None) -> str:
+    """Pressing Next without choosing must still give a good file: the preferred AI version
+    if its text is right, else the first AI version whose text is right, else the local
+    clean-up."""
+    good = [v["id"] for v in versions if v["kind"] == "ai" and not v["text_warning"]]
+    if prefer in good:
+        return prefer
+    return good[0] if good else "local"
+
+
+def _preferred(size_in: float, detail_risk: str | None) -> str:
+    """Professionals simplify detailed art for small placements (left chest, caps) and keep
+    more for jacket backs, so the Simplified redraw is the default there."""
+    if size_in <= 7.5 or detail_risk == "high":
+        return "simplified"
+    return "faithful"
 
 
 def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str, use_ai: bool = True,
@@ -114,7 +123,8 @@ def run_cleanup(data: bytes, job_dir: Path, *, fit: tuple, fabric_id: str, use_a
                "Simplified or Bold will sew best.")
     return {
         "versions": [_public(v) for v in versions],
-        "default": _pick_default(versions),
+        "default": _pick_default(versions, _preferred(
+            ctx["size_in"], (info["ai"] or {}).get("fine_detail_risk"))),
         "ai": {"used": len(versions) > 1, "problem": problem,
                "note": ai.REASONS.get(problem) if problem else None},
         "text": info["text"],

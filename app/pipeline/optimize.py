@@ -50,7 +50,24 @@ RULES_TEXT = ("Rules: flat solid colors only, no gradients, shadows, textures or
               "(window panes, bricks) into a few simple solid shapes.\n"
               "Leave at least 1 mm of space between separate shapes and inside letters.\n"
               "{text_rule}\n"
-              "Plain white background. Keep the subject, pose and layout recognizable. Center it.")
+              "Plain white background. Keep the subject, pose and layout recognizable. Center it.\n"
+              "{size_rule}")
+
+
+def _size_rule(size_in: float) -> str:
+    """How much detail survives at this size (Erich Campbell's left-chest / cap / jacket-back
+    versions; reports/Digitizing training and AI tools.md)."""
+    if size_in <= 4.5:
+        return ("This is a small embroidery (left chest or cap): draw buildings as their outline "
+                "and a few big blocks, with windows as rows of plain solid rectangles, no bricks, "
+                "no hatching, no texture lines. Draw trees and bushes as one to three simple "
+                "solid rounded masses, never leaves. Drop shading, shadows and thin decorative "
+                "lines. Make the most important element (the wordmark) big and bold.")
+    if size_in <= 7.5:
+        return ("Medium-size embroidery: simplify buildings to clear outlines, solid windows and "
+                "a few lines; trees as a few solid masses with a little inner detail; no shading.")
+    return ("Large embroidery (jacket back): keep the main details, but still no hairlines, "
+            "hatching or gradients; trees as several solid masses.")
 
 
 def _text_rule(text: list[str], min_text_mm: float) -> str:
@@ -67,7 +84,8 @@ def build_prompt(variant: dict, ctx: dict) -> str:
     rules = RULES_TEXT.format(
         n_colors=variant["colors"](ctx["max_colors"]),
         min_line_mm=variant["line_mm"], min_detail_mm=variant["detail_mm"],
-        text_rule=_text_rule(ctx.get("text") or [], ctx.get("min_text_mm", 5.0)))
+        text_rule=_text_rule(ctx.get("text") or [], ctx.get("min_text_mm", 5.0)),
+        size_rule=_size_rule(float(ctx.get("size_in", 4.0))))
     return (f"Redraw this image as embroidery-ready artwork for a {ctx['size_in']:g}-inch "
             f"design on {ctx['fabric']}.\n{rules}\n{variant['extra']}")
 
@@ -77,7 +95,8 @@ def tweak_prompt(change: str, ctx: dict) -> str:
     base = VARIANTS[0]
     rules = RULES_TEXT.format(
         n_colors=ctx["max_colors"], min_line_mm=base["line_mm"], min_detail_mm=base["detail_mm"],
-        text_rule=_text_rule(ctx.get("text") or [], ctx.get("min_text_mm", 5.0)))
+        text_rule=_text_rule(ctx.get("text") or [], ctx.get("min_text_mm", 5.0)),
+        size_rule=_size_rule(float(ctx.get("size_in", 4.0))))
     return (f"This is embroidery-ready artwork for a {ctx['size_in']:g}-inch design on "
             f"{ctx['fabric']}. Make this change and nothing else: {change}\n"
             f"Keep everything else exactly as it is.\n{rules}")

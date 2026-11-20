@@ -496,6 +496,11 @@ def try_satin(piece: Polygon, rules: dict, drop_hairlines: bool = False) -> list
             cols.append(c)
     if not cols:
         return None
+    if len(cols) == 1:
+        c = cols[0]
+        length = float(np.linalg.norm(np.diff(c["center"], axis=0), axis=1).sum())
+        if length < 2.0 * 2 * float(np.median(c["half"])):
+            return None          # a small block (a window), not a column: a fill looks cleaner
     try:
         cover = unary_union([c["outline"] for c in cols])
         covered = cover.intersection(target).area
@@ -899,6 +904,14 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     for info in row_info:
         row, height = info["row"], info["height"]
         keys = row_keys[row]
+        if text and info["color"] == inside and row not in fits and not lettering.fit_row(
+                info["glyphs"], text, "block", rules["satin_max_mm"]):
+            # Blank areas shut inside the design (the walls between a building's windows)
+            # can line up like letters. When the words are known and these spell none of
+            # them, they are not lettering: sew them as ordinary shapes.
+            info["text"] = None
+            info["not_text"] = True
+            continue
         if height < rules.get("drop_text_mm", 0.0):
             done.update(keys)          # the user chose to leave this tiny text out
             continue
@@ -953,6 +966,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     if debug_dir is not None and objects:
         debug_picture(objects, debug_dir)
 
+    row_info = [r for r in row_info if not r.get("not_text")]
+    by_row = {r: k for r, k in by_row.items() if r in {i["row"] for i in row_info}}
     heights = sorted({round(rows[k[0]]["height"], 2) for k in by_row.values()})
     kept = [h for h in heights if h >= rules.get("drop_text_mm", 0.0)]
     return {"objects": objects, "dropped_details": dropped, "order": order,

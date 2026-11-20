@@ -181,7 +181,7 @@ def test_cleanup_with_the_plan_makes_three_versions_and_no_polish(tmp_path, code
     job = tmp_path / "job"
     r = cleanup.run_cleanup(badge, job, fit=FIT, fabric_id="tshirt")
     assert [v["id"] for v in r["versions"]] == ["faithful", "simplified", "bold", "local"]
-    assert r["ai"]["used"] and r["default"] == "faithful" and r["spend"]["provider"] == "chatgpt"
+    assert r["ai"]["used"] and r["default"] == "simplified" and r["spend"]["provider"] == "chatgpt"
     assert len(fake.runs("redraw")) == 3
     # the plan draws full quality the first time, so choosing a version costs no extra call
     assert cleanup.picture_to_stitch(job, "faithful") == (job / "faithful.png").read_bytes()

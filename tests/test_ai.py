@@ -157,7 +157,7 @@ def test_with_ai_there_are_three_versions_plus_the_local_one(tmp_path, fake_ai, 
     client = fake_ai()
     r = cleanup.run_cleanup(badge, tmp_path / "job", fit=FIT, fabric_id="tshirt")
     assert [v["id"] for v in r["versions"]] == ["faithful", "simplified", "bold", "local"]
-    assert r["ai"]["used"] and r["default"] == "faithful"
+    assert r["ai"]["used"] and r["default"] == "simplified"     # small size: simplified art
     assert client.image_calls == 3 and r["text"] == ["TEST"]
     assert all('"TEST"' in p and "3.5-inch" in p for p in client.prompts)
     assert all(v["text_warning"] is None for v in r["versions"])
