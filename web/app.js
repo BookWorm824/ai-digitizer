@@ -9,6 +9,62 @@ const el = (tag, cls, text) => {
   return e;
 };
 
+// Little line drawings for the picture buttons (24 x 24, drawn with the text color).
+const SHIRT = 'M8 3 4 5 2 9l3 2 1-1v10h12V10l1 1 3-2-2-4-4-2a4 4 0 0 1-8 0Z';
+const ICONS = {
+  garment: SHIRT,
+  project: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z M12 7l1.5 3.2 3.5.4-2.6 2.4.7 3.5-3.1-1.8-3.1 1.8.7-3.5L7 10.6l3.5-.4Z',
+  tshirt: SHIRT,
+  hoodie: 'M8 4 4 6 2 11l3 1 1-2v10h12V10l1 2 3-1-2-5-4-2c-1 2-2 3-4 3S9 6 8 4Z M10 13h4v3h-4Z',
+  polo: 'M8 3 4 5 2 9l3 2 1-1v10h12V10l1 1 3-2-2-4-4-2-4 4-4-4Z M12 7v5',
+  hat: 'M4 15a8 8 0 0 1 16 0v1H4Z M20 16l2 2.5H10 M12 7V5.5',
+  softhat: 'M4 15a8 8 0 0 1 16 0v1H4Z M20 16l2 2.5H10 M12 7V5.5',
+  towel: 'M6 3h12v15H6Z M6 18v3h12v-3 M9 6.5h6 M9 9h6',
+  denim: 'M7 3h10l1 18h-4l-2-10-2 10H6Z M7 6h10',
+  fleece: 'M8 4 4 6 2 11l3 1 1-2v10h12V10l1 2 3-1-2-5-4-2c-1 2-2 3-4 3S9 6 8 4Z',
+  leather: 'M5 4h14l-1 5 1 11H5l1-11Z M9 9h6',
+  neoprene: 'M8 4h8l1 16H7Z M8 9h8',
+  delicate: 'M4 6c5-3 11 3 16 0v12c-5 3-11-3-16 0Z',
+  beanie: 'M5 16a7 7 0 0 1 14 0Z M4 16h16v4H4Z M12 9V7',
+  left_chest: `${SHIRT} M14 9.5h2.5V12H14Z`,
+  full_front: `${SHIRT} M9 9.5h6v6H9Z`,
+  hat_front: 'M4 15a8 8 0 0 1 16 0v1H4Z M20 16l2 2.5H10 M10 11h4v3h-4Z',
+  custom: 'M3 8h18v8H3Z M7 8v3 M11 8v4 M15 8v3 M19 8v4',
+  feltie: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z M12 7l1.5 3.2 3.5.4-2.6 2.4.7 3.5-3.1-1.8-3.1 1.8.7-3.5L7 10.6l3.5-.4Z',
+  keyfob: 'M12 9a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z M10 9V4a2 2 0 0 1 4 0v5',
+  coaster: 'M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z M9 9h6v6H9Z',
+  ornament: 'M12 7a7 7 0 1 0 0 14 7 7 0 0 0 0-14Z M10 7V4h4v3 M12 4V2',
+  plush: 'M12 6a7 7 0 1 0 0 14 7 7 0 0 0 0-14Z M6.5 7.5a2.5 2.5 0 1 1 3-3 M17.5 7.5a2.5 2.5 0 1 0-3-3 M10 12.5h.01 M14 12.5h.01 M11 15.5c.6.5 1.4.5 2 0',
+  zipbag: 'M3 7h18v12H3Z M3 10.5h18 M8 8.7h8',
+  pillow: 'M5 5c4 1 10 1 14 0-1 4-1 10 0 14-4-1-10-1-14 0 1-4 1-10 0-14Z',
+  pillowpanel: 'M4 4h16v16H4Z M8 8h8v8H8Z',
+  lace: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z M12 7.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z M12 3v4.5 M12 16.5V21 M3 12h4.5 M16.5 12H21',
+  circle: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z',
+  square: 'M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z',
+  follow: 'M12 3c4 0 8 2 8 6 0 3-2 4-2 6s1 5-6 6c-5 0-8-3-8-7 0-3 2-4 2-6 0-3 2-5 6-5Z',
+  rect: 'M3 7h18v10H3Z',
+  auto: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z M8.5 12.5l2.5 2.5 4.5-5',
+  api: 'M14.5 9.5a4.5 4.5 0 1 0-4 4L8 16H6v2H4v2h3l6.5-6.5a4.5 4.5 0 0 0 1-4Z',
+};
+
+function icon(id) {
+  const d = ICONS[id];
+  if (!d) return null;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'ico');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.5');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', d);
+  svg.append(path);
+  return svg;
+}
+
 const GARMENT_COLORS = ['#eeece6', '#9aa0a8', '#23262d', '#1f2a44', '#8f1f24'];
 const NO_SERVER = "We couldn't reach the digitizer. Make sure its window is still open, then try again.";
 
@@ -96,8 +152,11 @@ function choiceButtons(box, items, current, onPick) {
     const b = el('button');
     b.type = 'button';
     b.dataset.id = item.id;
-    b.textContent = item.name;
-    if (item.detail) b.appendChild(el('small', '', item.detail));
+    const picture = icon(item.icon || item.id);
+    if (picture) b.append(picture);
+    const label = el('span', 'label', item.name);
+    if (item.detail) label.appendChild(el('small', '', item.detail));
+    b.append(label);
     b.classList.toggle('on', item.id === current);
     b.addEventListener('click', () => onPick(item.id));
     box.appendChild(b);
