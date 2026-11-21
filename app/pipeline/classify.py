@@ -662,7 +662,7 @@ def _line_width(seg: np.ndarray, piece) -> float:
 
 
 def _web_weights(route: list, piece, least: float, bold: float,
-                 axis: float | None = None) -> list | None:
+                 axis: float | None = None, drawn: float | None = None) -> list | None:
     """Line weights for a web of outlines, or None if it is thin line work (running stitch).
     A web has one weight, its typical drawn width, so every wall is the same thickness (a
     line here and there measuring a little over or under must not come out bold beside
@@ -672,6 +672,10 @@ def _web_weights(route: list, piece, least: float, bold: float,
     thickens hairlines; finer webs are running stitch."""
     widths = np.array([_line_width(seg, piece) for seg in route])
     lengths = np.array([LineString(seg).length for seg in route])
+    if drawn:
+        # a drawing redrawn for its size (simplify.py): every line was drawn this wide
+        out = [max(drawn, least) if w >= 0.35 * drawn else 0.0 for w in widths]
+        return _uncrowd(route, out)
     twins = _twins(route, axis)
     for k, t in twins.items():                      # the two sides measure alike
         widths[k] = widths[t] = max(widths[k], widths[t])
@@ -817,6 +821,8 @@ def _web_blobs(poly: Polygon) -> list:
     blobs = core.buffer(r * 1.05, quad_segs=4).intersection(poly)
     return [b for b in polygons_of(blobs.buffer(0)) if b.area >= 12.0]
 
+
+FRAME_MIN_MM2 = 150.0   # a shape this big can be a frame (a building) that holds other shapes
 
 BLOCK_MIN_MM = 0.9     # the narrowest block that can be filled (two or three rows of thread)
 
@@ -1097,7 +1103,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                  "width_mm": width, "bean": False, "bold": bool(bold)}
             if use_satin and not rules.get("knockdown", False):
                 weights = _web_weights(route, piece, rules.get("satin_net_min_mm", 1.1),
-                                       rules["line_bold_mm"], net.get("axis"))
+                                       rules["line_bold_mm"], net.get("axis"),
+                                       rules.get("drawn_line_mm"))
                 if weights:
                     o["satin_w"] = weights
             objects.append(o)
@@ -1107,6 +1114,16 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         """A part that is narrow all over: satin if it is a real column, bean lines if it is
         thin or a web of outlines, otherwise a fill."""
         nonlocal dropped
+        blobs = _web_blobs(part)
+        if blobs:
+            # a web of outlines with solid masses joined to it (a tree touching a building):
+            # the masses are filled, the outlines around them sewn on their own
+            for b in blobs:
+                add_fill(b, color)
+            for rest in polygons_of(part.difference(unary_union(blobs).buffer(0.05))):
+                if rest.area >= min_area and not _web_blobs(rest):
+                    sew_narrow(rest, color)
+            return
         dot = _dot(part, rules["satin_max_mm"]) if use_satin else None
         if dot:
             # (little pull compensation: a dot stretched along its stitches sews as an oval)
@@ -1251,9 +1268,20 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     # be claimed by one row only: the best match wins.
     fits, absorbed = {}, set()
     if letters != "trace" and text:
+        # Lettering is never inside a drawing: shapes lined up inside a building's outline
+        # (the panels of a door) are part of the building, even when they happen to look
+        # like a short word.
+        frames = [Polygon(q.exterior) for polys in shapes.values() for q in polys
+                  if q.area >= FRAME_MIN_MM2]
         for info in row_info:
             h = info["height"]
             if h < rules.get("drop_text_mm", 0.0):
+                continue
+            ug = unary_union(info["glyphs"])
+            if any(f.contains(ug.centroid) and not any(f.equals(Polygon(g.exterior))
+                                                        for g in info["glyphs"])
+                   and f.area > 8.0 * ug.convex_hull.area for f in frames):
+                info["not_text"] = True
                 continue
             style = "block"
             want = letters == "retype" or h < RETYPE_AUTO_MM
@@ -1349,18 +1377,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 dropped += 1            # a thin gap between parts is open fabric, not thread
                 continue
             if poly.buffer(-satin_half).is_empty:          # narrow all over
-                blobs = _web_blobs(poly)
-                if not blobs:
-                    sew_narrow(poly, color)
-                    continue
-                # A web of thin outlines with solid masses joined to it (trees touching a
-                # building): the masses are filled, the outlines sewn as lines around them.
-                for b in blobs:
-                    add_fill(b, color)
-                rest = poly.difference(unary_union(blobs).buffer(0.05))
-                for part in polygons_of(rest):
-                    if part.area >= min_area:
-                        sew_narrow(part, color)
+                sew_narrow(poly, color)
                 continue
             # Parts wider than satin can carry are filled. What is left over are narrow arms
             # and outlines hanging off them: sewn as satin, bean lines or fill on their own.

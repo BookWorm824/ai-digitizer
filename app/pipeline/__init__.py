@@ -13,7 +13,7 @@ from typing import Callable
 from .. import ai, config, threads
 from shapely.ops import unary_union
 
-from . import (aiplan, analyze, classify, clean, edits as edits_stage, export, intake, ith,
+from . import (aiplan, analyze, classify, clean, edits as edits_stage, export, intake, ith, simplify,
                lettering, optimize, sequence, stitch, validate, vectorize)
 from .common import PipelineError, hex_of
 
@@ -75,6 +75,13 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
 
     say("intake")
     img = intake.run(data, debug_dir)
+    if rules.get("auto_simplify", True):
+        # fine pen drawings (window panes, stonework, leafy trees) are redrawn for their
+        # stitched size first; art that is already bold enough passes through unchanged
+        simple = simplify.run(img, fit_w_mm, fit_h_mm, debug_dir)
+        if simple is not None:
+            img = simple
+            rules["drawn_line_mm"] = simplify.LINE_W_MM     # its lines are this wide
     say("clean")
     cleaned = clean.run(img, fit_w_mm, fit_h_mm, rules, debug_dir)
     say("vectorize")
