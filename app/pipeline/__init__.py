@@ -40,6 +40,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
                  density: int = 0, hints: dict | None = None, inside: str = "auto",
                  edits: list | None = None, project: dict | None = None,
                  letters: str = "auto", ai_assist: bool = False, ai_review: bool = True,
+                 garment: str | None = None,
                  progress: Callable[[str], None] | None = None, debug: bool = True) -> dict:
     """Run every stage and return a JSON-able summary. Files land in out_dir."""
     out_dir = Path(out_dir)
@@ -61,6 +62,12 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         rules["drop_text_mm"] = 0.0 if v < 0 else v
     if inside in ("sew", "open"):       # the user's own choice for blank areas inside the design
         rules["sew_enclosed_background"] = inside == "sew"
+    if garment:                         # "#rrggbb": decides whether blank areas need thread
+        try:
+            v = int(garment.lstrip("#")[:6], 16)
+            rules["garment_rgb"] = (v >> 16 & 255, v >> 8 & 255, v & 255)
+        except ValueError:
+            pass
 
     def say(stage):
         if progress:

@@ -58,6 +58,8 @@ NARROW_TEXT_MM = 4.0         # from here up to SATIN_TEXT_MM, letters are a narr
 NARROW_MIN_MM = 0.8          # (0.8-1.2 mm): bean letters sink into twill, pique and caps and
                              # look pale from 3 ft; a narrow satin reads bolder (Embroidery
                              # Legacy group, members' advice on small left-chest lettering)
+SPLIT_SATIN_MAX = 1.7        # split satin serves strokes up to about 12 mm (1.7 x the
+                             # longest stitch); wider strokes are filled
 LIGHT_MM = 0.85              # lettering traced thinner than this is retyped as a fine line
 LETTER_MAX_RATIO = 0.3       # traced "letters" heavier than this x their height aren't text
 SERIF_MIN_MM = 8.0
@@ -651,7 +653,7 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
         strokes = letter_strokes(pl, style)
         # wide satin is split across the column when sewn (stitch.split_long), so letters
         # stay satin up to twice the longest stitch; only wider strokes become fill
-        wide = pl.w > 2 * rules.get("satin_max_mm", 7.0)
+        wide = pl.w > SPLIT_SATIN_MAX * rules.get("satin_max_mm", 7.0)
         cols = []
         for si, st in enumerate(strokes):
             seq = (group, li, si)

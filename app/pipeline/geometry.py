@@ -150,6 +150,14 @@ def _straight(span: np.ndarray, tol: float):
     d = vt[0]
     off = (span - c) @ np.array([-d[1], d[0]])
     worst, rms = float(np.abs(off).max()), float(np.sqrt(np.mean(off ** 2)))
+    # A short arc (part of a small circle: a clock face, a letter's bowl) lies within `tol`
+    # of a line too, but it bows steadily to one side. Straightening such arcs turns a
+    # circle into a hexagon. Noise doesn't bow: its middle sits where its ends do.
+    third = max(1, len(off) // 3)
+    bow = abs(float(off[third:-third].mean() if len(off) > 2 * third else off.mean())
+              - float(np.concatenate([off[:third], off[-third:]]).mean()))
+    if bow > 0.1 and bow > 0.04 * float(np.linalg.norm(span[-1] - span[0])):
+        return None
     if worst <= tol or (worst <= 2 * tol and rms <= tol / 2):
         t0, t1 = float((span[0] - c) @ d), float((span[-1] - c) @ d)
         return np.vstack([c + d * t0, c + d * t1])
@@ -249,7 +257,8 @@ def main_axes(piece_lists: list[list[dict]]) -> list[float]:
     return axes
 
 
-def _snap(pieces: list[dict], axes: list[float], closed: bool) -> list[dict]:
+def _snap(pieces: list[dict], axes: list[float], closed: bool,
+          snap_deg: float = SNAP_DEG, snap_max_deg: float = SNAP_MAX_DEG) -> list[dict]:
     """Turn near-axis straight pieces exactly onto the axis, then re-make the corners where
     neighbouring straight pieces meet."""
     out = []
@@ -260,7 +269,7 @@ def _snap(pieces: list[dict], axes: list[float], closed: bool) -> list[dict]:
         p, q = pc["pts"][0], pc["pts"][-1]
         L = float(np.linalg.norm(q - p))
         ang = _angle(p, q)
-        allow = min(SNAP_MAX_DEG, max(SNAP_DEG, math.degrees(math.atan2(0.15, max(L, 1e-6)))))
+        allow = min(snap_max_deg, max(snap_deg, math.degrees(math.atan2(0.15, max(L, 1e-6)))))
         best = None
         for a in axes:
             d = (ang - a + 90.0) % 180.0 - 90.0

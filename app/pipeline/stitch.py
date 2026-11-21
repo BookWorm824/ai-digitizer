@@ -28,7 +28,7 @@ import cv2
 import numpy as np
 from shapely import affinity
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
-from shapely.ops import unary_union, voronoi_diagram
+from shapely.ops import substring, unary_union, voronoi_diagram
 from shapely.prepared import prep
 
 from .classify import column_rails
@@ -42,6 +42,12 @@ UNDERLAY_STITCH_MM = 2.0           # stitch length of underlay runs
 
 
 # ----------------------------------------------------------------------------- running stitch
+
+TIGHT_CURVE_STITCH_MM = 1.0     # shortest run stitch, used only round small circles
+                                # (the floor professionals give for small rings)
+SMALL_SHAPE_MM = 25.0           # ... on lines no longer than this (a 8 mm circle)
+MAX_TURN_RAD = math.radians(30)  # a curve may turn this much from one stitch to the next
+
 
 def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
     """Needle points along a line: corners are kept, tight curves get shorter stitches."""
@@ -73,7 +79,10 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
         # 1.25 mm (shorter stitches pile on top of each other and sink). Tiny letters ask for
         # shorter stitches themselves (tip 48: shorten the run to smooth small objects).
         base = rules["run_stitch_mm"]
-        for step in (base, min(base, rules["run_stitch_curve_mm"]), min(base, 1.25)):
+        steps = [base, min(base, rules["run_stitch_curve_mm"]), min(base, 1.25)]
+        if sub.length <= SMALL_SHAPE_MM:          # only small shapes: a long line with one
+            steps.append(min(base, TIGHT_CURVE_STITCH_MM))   # tight bend keeps normal stitches
+        for step in steps:
             # equal stitches no shorter than `step` (rounding the count down, not up)
             n = max(1, math.floor(sub.length / step + 1e-9))
             pts = [sub.interpolate(sub.length * k / n) for k in range(n + 1)]
@@ -84,7 +93,14 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
                 mx = (pts[k].x + pts[k + 1].x) / 2
                 my = (pts[k].y + pts[k + 1].y) / 2
                 worst = max(worst, math.hypot(mid_on_path.x - mx, mid_on_path.y - my))
-            if worst <= 0.12:       # stitches hug the curve: no visible flat spots
+            # ... and does the line turn so much from one stitch to the next that a small
+            # circle shows its corners (a clock face sewn as a hexagon)?
+            turn = 0.0
+            for k in range(1, n):
+                a1 = math.atan2(pts[k].y - pts[k - 1].y, pts[k].x - pts[k - 1].x)
+                a2 = math.atan2(pts[k + 1].y - pts[k].y, pts[k + 1].x - pts[k].x)
+                turn = max(turn, abs((a2 - a1 + math.pi) % (2 * math.pi) - math.pi))
+            if worst <= 0.12 and turn <= MAX_TURN_RAD:
                 break
         out.extend((p.x, p.y) for p in pts[1:])
     return out
@@ -315,14 +331,40 @@ def _row_xs(a: float, b: float, i: int, length: float, rng=None, jitter: float =
 
 
 def _section_points(sec: list, top_first: bool, left_first: bool, length: float,
-                    rng=None, jitter: float = 0.0) -> list:
+                    rng=None, jitter: float = 0.0, inside=None) -> list:
+    """Needle points for a section, back and forth along its rows. The step from one row to
+    the next is normally one stitch. Where the next row begins far along from where this
+    one ended (the shape steps in or out, or widely spaced underlay rows straddle a notch)
+    a straight stitch could lie across open fabric: the thread then runs back along the row
+    just sewn, crosses where both rows exist, and runs out along the new row."""
     rows = sec if top_first else sec[::-1]
     pts, left = [], left_first
+    prev = None                                    # (y, a, b) of the row before
     for i, y, a, b in rows:
         xs = _row_xs(a, b, i, length, rng, jitter)
         if not left:
             xs = xs[::-1]
+        if prev is not None and pts:
+            (ex, ey), sx = pts[-1], xs[0]
+            dy = abs(y - ey)
+            if abs(sx - ex) > max(1.5, 2.0 * dy):
+                if inside is not None and inside.contains(LineString([(ex, ey), (sx, y)])):
+                    # a straight step stays on the shape: just keep its stitches short
+                    n = math.ceil(math.hypot(sx - ex, y - ey) / length)
+                    pts.extend((ex + (sx - ex) * k / n, ey + (y - ey) * k / n)
+                               for k in range(1, n))
+                else:
+                    _py, pa, pb = prev
+                    xw = min(max(sx, pa), pb)      # on the row just sewn, nearest the new start
+                    xw = min(max(xw, a), b)        # and on the new row
+                    for x0, x1, yy in ((ex, xw, ey), (xw, sx, y)):
+                        if abs(x1 - x0) > 0.3:
+                            n = math.ceil(abs(x1 - x0) / length)
+                            pts.extend((x0 + (x1 - x0) * k / n, yy) for k in range(1, n + 1))
+                    if pts[-1] == (xs[0], y):
+                        xs = xs[1:]
         pts.extend((x, y) for x in xs)
+        prev = (y, a, b)
         left = not left
     return pts
 
@@ -343,6 +385,8 @@ class _Router:
     def __init__(self, shape: Polygon, inside, light: bool = False):
         self.shape, self.inside, self.mask = shape, inside, None
         self.light = light
+        self.rings = None
+        self.loose = None
         minx, miny, maxx, maxy = shape.bounds
         self.cell = max(0.5, max(maxx - minx, maxy - miny) / 220.0)
         self.minx, self.miny = minx, miny
@@ -371,6 +415,39 @@ class _Router:
         # noticeable place to cross ground that is already filled
         inner = cv2.erode(self.mask, np.ones((3, 3), np.uint8), iterations=2)
         self.edge = (self.mask == 1) & (inner == 0)
+
+    def along_edge(self, p, q, tol: float = 1.2):
+        """The way from p to q along the shape's own outline (the shorter way round), when
+        both lie on the same outline. Thread that must cross finished stitching is least
+        seen there: right on the edge, under the outline or border when there is one
+        ("travel on edge"), and it is a clean line instead of a path across the rows."""
+        if self.rings is None:
+            self.rings = [LineString(r.coords) for r in (self.shape.exterior, *self.shape.interiors)
+                          if r.length > 1.0]
+        P, Q = Point(p), Point(q)
+        ring = min(self.rings, key=lambda r: r.distance(P), default=None)
+        if ring is None or ring.distance(P) > tol or ring.distance(Q) > tol:
+            return None
+        a, b, total = ring.project(P), ring.project(Q), ring.length
+        fwd = (b - a) % total
+        if min(fwd, total - fwd) > 3.0 * dist(p, q) + 25.0:
+            return None                              # too far round: not worth it
+
+        def walk(s0, s1):                            # forward along the ring, with wrap
+            if s1 >= s0:
+                return list(substring(ring, s0, s1).coords)
+            return list(substring(ring, s0, total).coords) + list(substring(ring, 0.0, s1).coords)
+        pts = walk(a, b) if fwd <= total - fwd else walk(b, a)[::-1]
+        return [p] + [(float(x), float(y)) for x, y in pts] + [q]
+
+    def stays_in(self, path) -> bool:
+        """Does every hop of a route stay on the shape (give or take a grid cell)? The grid
+        is coarse, so a route can cut across a narrow notch between two parts of a shape,
+        which would leave thread lying on open fabric."""
+        if self.loose is None:
+            self.loose = prep(self.shape.buffer(0.6 * self.cell))
+        return all(self.loose.contains(LineString([a, b]))
+                   for a, b in zip(path, path[1:]) if dist(a, b) > 1e-6)
 
     def mark_filled(self, section: list) -> None:
         """Remember that these rows (in this router's own frame) are now covered in thread."""
@@ -454,7 +531,12 @@ def _travel(p, q, inside, router: _Router, step: float):
     if ((not router.any_filled and not router.light) or d < short)             and inside.contains(LineString([p, q])):
         path = [p, q]
     else:
-        path = router(p, q)
+        path = router.along_edge(p, q) if (router.any_filled or router.light) else None
+        if path is None:
+            path = router(p, q)
+            if path is not None and not router.stays_in(path):
+                # the grid route cut across a notch of open fabric: go round by the edge
+                path = router.along_edge(p, q)
         if path is None:
             return None
     out = []
@@ -531,7 +613,7 @@ def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float
                 break
         _, s, top, left = best
         todo.remove(s)
-        pts = _section_points(sections[s], top, left, length, rng, jitter)
+        pts = _section_points(sections[s], top, left, length, rng, jitter, inside)
         if seg:
             walk = _travel(seg[-1], pts[0], inside, router, travel_step)
             if walk is None:
@@ -615,7 +697,38 @@ def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
     top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"], rules["fill_stitch_mm"],
                         start, extend=extend)
     _append(segments, top, cover, router)
+    if obj.get("edge") and segments:
+        _outline(segments, poly, rules)
     return segments
+
+
+EDGE_STITCH_MM = 1.8
+
+
+def _outline(segments: list, poly: Polygon, rules: dict) -> None:
+    """A bean run around a filled shape, sewn straight after its fill. The outer outline
+    starts at the point nearest the fill's last stitch (the fill ends on the edge, so no
+    travel shows); each hole's outline is its own thread."""
+    first = True
+    for part in polygons_of(poly.buffer(-0.15)):
+        for ring in [part.exterior, *part.interiors]:
+            line = LineString(ring.coords)
+            if line.length < 2.0:
+                continue
+            coords = list(line.coords)[:-1]
+            if first:                                   # begin where the fill left off
+                last = segments[-1][-1]
+                at = line.project(Point(last))
+                head = list(substring(line, at, line.length).coords)
+                tail = list(substring(line, 0.0, at).coords)
+                coords = head[:-1] + tail
+            loop = LineString(coords + [coords[0]])
+            pts = bean(run_points(loop, dict(rules, run_stitch_mm=EDGE_STITCH_MM)))
+            if first and dist(segments[-1][-1], pts[0]) <= 1.0:
+                segments[-1].extend(pts)
+            else:
+                segments.append(pts)
+            first = False
 
 
 TEXTURE = {"jitter": 0.25, "ragged": 0.6, "length": 4.0, "second_turn": 40.0}

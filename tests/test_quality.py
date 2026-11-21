@@ -49,7 +49,8 @@ def test_a_narrow_bar_becomes_one_satin_column():
 
 @pytest.mark.parametrize("shape, kinds", [
     (box(0, 0, 30, 30), ["fill"]),                                    # wide: fill
-    (Point(0, 0).buffer(3), ["fill"]),                                # a dot is not a column
+    (Point(0, 0).buffer(3), ["satin"]),                               # a small dot: satin across it
+    (Point(0, 0).buffer(5), ["fill"]),                                # a big dot is filled
     (box(0, 0, 30, 0.7), ["run"]),                                    # thin: running stitch
     (box(0, 0, 30, 1.0), ["run"]),                                    # 1 mm: a bold run line
     (box(0, 0, 30, 1.4), ["run"]),                                    # still run, not thin satin
@@ -452,7 +453,9 @@ def test_white_lettering_inside_a_design_is_sewn_not_left_as_holes(tmp_path):
     r = run_pipeline(buf.getvalue(), tmp_path, "t", debug=False)
     hexes = [c["hex"] for c in r["colors"]]
     assert len(hexes) == 2 and any(h.startswith("#f") or h == "#ffffff" for h in hexes)
-    assert r["stats"]["satin_columns"] >= 4                     # the letter strokes
+    white = next(c for c in r["colors"] if c["hex"].startswith("#f"))
+    assert white["stitches"] > 500                              # the letters themselves
+    # (the banner around them is one fill with the letters cut out, not satin scraps)
     assert r["files"]["pes"]["ok"]
 
 

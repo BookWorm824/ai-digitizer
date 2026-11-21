@@ -87,6 +87,9 @@ def _smooth(labels: np.ndarray, sigma: float) -> np.ndarray:
     return out
 
 
+GARMENT_DIFFERS = 14.0     # Lab distance beyond which a garment is not the paper's color
+
+
 def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         debug_dir: Path | None = None) -> dict:
     rgb, alpha = intake["rgb"], intake["alpha"]
@@ -241,11 +244,23 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
             return None
         found["present"] = True
         mode = rules.get("sew_enclosed_background", "auto")
-        if mode == "auto":
+        if mode == "auto" and rules.get("garment_rgb") is not None:
+            # As a digitizer decides it: when the garment is (nearly) the color of the blank
+            # areas, the fabric is that color and nothing is sewn there; on any other garment
+            # they are sewn, all of them, or the design would show the garment through.
+            g = np.asarray(rules["garment_rgb"], np.float32).reshape(1, 1, 3) / 255.0
+            g_lab = cv2.cvtColor(g, cv2.COLOR_RGB2Lab)[0, 0]
+            mode = float(np.linalg.norm(g_lab - centers[bg_id])) > GARMENT_DIFFERS
+        elif mode == "auto":
             # Solid artwork (a badge, a logo): the blank areas inside it are meant to be that
             # color, so sew them. A line drawing: the blanks are just paper, leave them open.
+            # Judged at left-chest scale (about 1 mm on a 90 mm design) whatever size is
+            # being made, so the same picture gets the same answer at every size: a line
+            # drawing blown up to a jacket back is still a line drawing.
             design = ((cmap != bg_id) & fg).astype(np.uint8)
-            r_mm = max(1, round(1.0 * ppm))
+            ys, xs = np.nonzero(design)
+            span = max(int(xs.max() - xs.min()), int(ys.max() - ys.min())) if len(xs) else 0
+            r_mm = max(1, round(max(1.0 * ppm, 0.011 * span)))
             core = cv2.erode(design, cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE, (2 * r_mm + 1, 2 * r_mm + 1)))
             mode = core.sum() >= 0.2 * max(1, design.sum())

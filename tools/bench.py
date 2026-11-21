@@ -44,6 +44,7 @@ from app.pipeline import run_pipeline  # noqa: E402
 SIZES = {2.25: "cap", 3.5: "left chest", 10.0: "jacket back"}
 OLLAMA = "http://127.0.0.1:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
+GARMENT = "#eeece6"          # the app's default garment color (off-white)
 
 CRITIQUE_SCHEMA = {
     "type": "object",
@@ -188,7 +189,7 @@ def run(designs: list[Path], sizes: list[float], overrides: dict, use_ai: bool) 
                 hints["text"] = [l.strip() for l in words.read_text(encoding="utf-8").splitlines() if l.strip()]
             r = run_pipeline(art, out / name, name, fit_w_mm=size * 25.4, fit_h_mm=size * 25.4,
                              fabric_id="hat" if size <= 2.5 else "tshirt", hints=hints,
-                             overrides=overrides or None, debug=False)
+                             overrides=overrides or None, debug=False, garment=GARMENT)
             c = checks(r)
             item = {"design": path.stem, "size": size, "checks": c, "checks_score": checks_score(c),
                     "seconds": round(time.time() - t, 1)}

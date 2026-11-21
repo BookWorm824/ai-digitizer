@@ -177,3 +177,105 @@ def test_light_texture_travel_keeps_to_the_edge():
     # it goes round by the edge, not straight across the open middle
     assert min(min(x, 30 - x, y, 30 - y) for x, y in walk) < 1.5
     assert not any(10 < x < 20 and 10 < y < 20 for x, y in walk)
+
+
+# ------------------------------------------------- round three: what the close-ups showed
+
+def test_a_nearly_symmetric_drawing_is_made_exactly_symmetric():
+    rng = np.random.default_rng(1)
+    left = np.array([[-10, 0], [-10, 8], [-6, 8], [-6, 3], [-3, 3], [-3, 12], [-8, 12]], float)
+    right = left * [-1, 1]
+    axis = np.array([[0, 0], [0, 12]], float)
+    nodes = np.vstack([left + rng.uniform(-0.25, 0.25, left.shape), right, axis + [0.2, 0]]) + [40, 5]
+    out, twin, c = linenet.symmetrize(nodes)
+    assert twin is not None and abs(c - 40) < 0.3
+    n = len(left)
+    for i in range(n):                                     # each pair mirrors exactly
+        assert abs((out[i, 0] - c) + (out[n + i, 0] - c)) < 1e-6
+        assert abs(out[i, 1] - out[n + i, 1]) < 1e-6
+    assert np.allclose(out[2 * n:, 0], c)                  # and the middle sits on the axis
+    # a lopsided drawing is left alone
+    lop = np.vstack([left, left + [3, 20], axis])
+    same, twin2, _ = linenet.symmetrize(lop)
+    assert twin2 is None and np.allclose(same, lop)
+
+
+def test_short_arcs_of_a_small_circle_stay_curved():
+    t = np.linspace(0, math.pi / 2, 40)
+    arc = np.column_stack([2.5 * np.cos(t), 2.5 * np.sin(t)])     # a quarter of a 5 mm circle
+    pieces = geometry.fit(arc, False, tol=0.3)
+    assert any(p["kind"] == "curve" for p in pieces)
+    wall = np.column_stack([np.linspace(0, 30, 200), 0.1 * np.sin(np.linspace(0, 20, 200))])
+    assert [p["kind"] for p in geometry.fit(wall, False, tol=0.3)] == ["line"]
+
+
+def test_small_circles_are_sewn_with_stitches_short_enough_to_look_round():
+    circle = LineString([(2.5 * math.cos(a), 2.5 * math.sin(a))
+                         for a in np.linspace(0, 2 * math.pi, 90)])
+    pts = np.asarray(stitch.run_points(circle, dict(RULES, run_stitch_mm=2.0)))
+    d = np.diff(pts, axis=0)
+    ang = np.arctan2(d[:, 1], d[:, 0])
+    turn = np.abs((np.diff(ang) + math.pi) % (2 * math.pi) - math.pi)
+    assert math.degrees(turn.max()) <= 31
+    assert np.linalg.norm(d, axis=1).min() >= 0.95
+
+
+def test_fill_rows_never_link_across_open_fabric():
+    # an N: widely spaced rows straddle the notch between the stem and the diagonal
+    n = Polygon([(0, 0), (4, 0), (10, 9), (10, 0), (14, 0), (14, 14), (10, 14), (4, 5),
+                 (4, 14), (0, 14)])
+    for spacing in (2.5, 0.45):
+        for angle in (18.0, 108.0, 162.0):
+            for seg in stitch.fill_segments(n, angle, spacing, 4.0):
+                for a, b in zip(seg, seg[1:]):
+                    if math.dist(a, b) > 1.0:
+                        assert n.buffer(0.35).contains(LineString([a, b])), (spacing, angle, a, b)
+
+
+def test_a_small_round_dot_is_one_satin_column():
+    from shapely.geometry import Point
+    from app.pipeline.classify import _dot
+    dot = _dot(Point(5, 5).buffer(1.5), 7.0)
+    assert dot is not None and abs(float(dot["half"].max()) - 1.5) < 0.1
+    assert _dot(box(0, 0, 3, 3).buffer(0), 7.0) is None           # a square is not a dot
+    assert _dot(Point(0, 0).buffer(6.0), 7.0) is None             # too big for one satin
+
+
+def _house(garment):
+    img = Image.new("RGB", (500, 400), "white")
+    d = ImageDraw.Draw(img)
+    d.rectangle([60, 120, 440, 340], outline="black", width=14)
+    d.line([250, 120, 250, 340], fill="black", width=14)
+    d.rectangle([100, 170, 190, 290], fill="black")
+    d.rectangle([310, 170, 400, 290], fill="black")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue(), garment
+
+
+def test_blank_areas_are_sewn_only_when_the_garment_is_another_color(tmp_path):
+    art, _ = _house(None)
+    kw = dict(fit_w_mm=150, fit_h_mm=150, debug=False)
+    on_white = run_pipeline(art, tmp_path / "w", "w", garment="#eeece6", **kw)
+    on_navy = run_pipeline(art, tmp_path / "n", "n", garment="#1f2a44", **kw)
+    assert on_white["stats"]["colors"] == 1 and not on_white["inside"]["sewn"]
+    assert on_navy["stats"]["colors"] == 2 and on_navy["inside"]["sewn"]
+    # the white is the ground: sewn first, as one piece under the middle wall
+    first = on_navy["blocks"][0]
+    assert first["hex"].lower() in ("#ffffff", "#fefefe", "#fdfdfd") or sum(first["rgb"]) > 700
+    assert len(first["segments"]) <= 2
+
+
+def test_color_around_knocked_out_letters_is_one_fill_not_satin_scraps(tmp_path):
+    img = Image.new("RGB", (700, 300), "white")
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([20, 60, 680, 240], radius=25, fill=(200, 40, 50))
+    for k, x in enumerate((250, 330, 410)):               # three blocky "letters" cut out
+        d.rectangle([x, 100, x + 50, 200], fill="white")
+        d.rectangle([x + 18, 120 + 20 * k, x + 50, 150 + 10 * k], fill=(200, 40, 50))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    r = run_pipeline(buf.getvalue(), tmp_path, "banner", fit_w_mm=90, fit_h_mm=90, debug=False,
+                     garment="#eeece6")
+    assert r["stats"]["satin_columns"] == 0
+    assert r["stats"]["colors"] == 1

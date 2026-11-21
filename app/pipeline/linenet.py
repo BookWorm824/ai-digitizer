@@ -29,6 +29,9 @@ SPUR_MM = 1.0            # loose stubs shorter than this are dropped (smallest d
 ALIGN_MM = 0.25          # levels/uprights closer than this are made exactly equal
 LINE_TOL_MM = 0.3        # a centre-line edge this close to straight is drawn straight
 AXIS_DEG = 8.0           # a straight edge this close to level/upright is made exactly so
+MIRROR_TOL_MM = 0.7      # a junction this close to another's mirror image is its twin
+MIRROR_SHARE = 0.7       # a drawing is symmetric when this share of its junctions have twins
+MIRROR_MIN_NODES = 12
 
 
 class _UF:
@@ -131,7 +134,12 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float]) -> np.nd
         pieces = geometry.fit(e["pts"], False, tol=LINE_TOL_MM)
         e["straight"] = len(pieces) == 1 and pieces[0]["kind"] == "line"
         if not e["straight"] and pieces:
-            e["pts"] = geometry._join(geometry._snap(pieces, axes, False))
+            # (centre lines lean more than outlines do: junctions drag their ends about)
+            e["pts"] = geometry._join(geometry._snap(pieces, axes, False, snap_deg=6.0,
+                                                     snap_max_deg=AXIS_DEG))
+    nodes, twin, mid = symmetrize(nodes)
+    if twin is not None:
+        _mirror_edges(edges, twin, mid)
     for axis in (1, 0):                               # 1: level edges share y; 0: uprights share x
         uf = _UF(len(nodes))
         for e in edges:
@@ -170,6 +178,101 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float]) -> np.nd
             t = np.linspace(0.0, 1.0, len(p))[:, None]
             e["pts"] = p + (1 - t) * (a - p[0]) + t * (b - p[-1])
     return nodes
+
+
+def symmetrize(nodes: np.ndarray) -> np.ndarray:
+    """Make a drawing that is nearly mirror-symmetric (a building front, an emblem) exactly
+    so. Tracing leaves each side a little different: one tower leans, a window sits lower.
+    Those are the first things the eye catches, and a digitizer draws the two sides alike.
+    Finds the upright axis that pairs the most junctions with a twin on the other side; if
+    most have one, each pair is moved to its average position and junctions on the axis are
+    put exactly on it."""
+    n = len(nodes)
+    if n < MIRROR_MIN_NODES:
+        return nodes, None, 0.0
+    xs, ys = nodes[:, 0], nodes[:, 1]
+
+    def twins(c):
+        mx = 2.0 * c - xs
+        d = np.hypot(mx[:, None] - xs[None, :], ys[:, None] - ys[None, :])
+        j = d.argmin(axis=1)
+        ok = d[np.arange(n), j] <= MIRROR_TOL_MM
+        mutual = ok & (j[j] == np.arange(n))          # each is the other's nearest twin
+        return j, mutual
+
+    c0 = (xs.min() + xs.max()) / 2.0
+    best = None
+    for c in c0 + np.linspace(-1.5, 1.5, 31):
+        j, mutual = twins(c)
+        score = int(mutual.sum())
+        if best is None or score > best[0]:
+            best = (score, c)
+    j, mutual = twins(best[1])
+    pairs = [(i, int(j[i])) for i in range(n) if mutual[i] and i < j[i]]
+    if pairs:                                          # the axis the pairs themselves agree on
+        c = float(np.mean([(xs[a] + xs[b]) / 2.0 for a, b in pairs]))
+        j, mutual = twins(c)
+    else:
+        c = best[1]
+    if mutual.sum() < MIRROR_SHARE * n:
+        return nodes, None, 0.0
+    out = nodes.copy()
+    for i in range(n):
+        k = int(j[i])
+        if not mutual[i] or k < i:
+            continue
+        if k == i:                                     # on the axis
+            out[i, 0] = c
+            continue
+        half = (abs(xs[i] - c) + abs(xs[k] - c)) / 2.0
+        y = (ys[i] + ys[k]) / 2.0
+        out[i] = (c - half if xs[i] < c else c + half, y)
+        out[k] = (c - half if xs[k] < c else c + half, y)
+    twin = np.where(mutual, j, -1)
+    return out, twin, c
+
+
+def _resampled(pts: np.ndarray, n: int) -> np.ndarray:
+    d = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    t = np.linspace(0.0, d[-1], n)
+    return np.column_stack([np.interp(t, d, pts[:, 0]), np.interp(t, d, pts[:, 1])])
+
+
+def _mirror_edges(edges: list[dict], twin: np.ndarray, c: float) -> None:
+    """Give the two sides of a symmetric drawing the same lines: each edge takes the shape
+    of its mirror twin. If either is straight, both are; otherwise both take the simpler
+    of the two curves. An edge that crosses the axis is averaged with its own reflection."""
+    by = {}
+    for k, e in enumerate(edges):
+        by.setdefault((min(e["a"], e["b"]), max(e["a"], e["b"])), []).append(k)
+    for k, e in enumerate(edges):
+        ta, tb = int(twin[e["a"]]), int(twin[e["b"]])
+        if ta < 0 or tb < 0:
+            continue
+        mine, theirs = (min(e["a"], e["b"]), max(e["a"], e["b"])), (min(ta, tb), max(ta, tb))
+        if len(by.get(mine, [])) != 1 or len(by.get(theirs, [])) != 1:
+            continue                                  # two lines between the same junctions
+        if mine == theirs:                            # crosses the axis: its own twin
+            if not e["straight"] and e["a"] != e["b"] and len(e["pts"]) >= 2:
+                n = max(8, len(e["pts"]))
+                fwd = _resampled(np.asarray(e["pts"], float), n)
+                back = fwd[::-1].copy()
+                back[:, 0] = 2.0 * c - back[:, 0]
+                e["pts"] = (fwd + back) / 2.0
+            continue
+        m = by[theirs][0]
+        if m < k:
+            continue
+        o = edges[m]
+        if e["straight"] or o["straight"]:
+            e["straight"] = o["straight"] = True
+            continue
+        src, dst = (e, o) if len(e["pts"]) <= len(o["pts"]) else (o, e)
+        pts = np.asarray(src["pts"], float).copy()
+        pts[:, 0] = 2.0 * c - pts[:, 0]
+        if int(twin[src["a"]]) != dst["a"]:
+            pts = pts[::-1]
+        dst["pts"] = pts
 
 
 def tours(nodes: np.ndarray, edges: list[dict], start_hint=None) -> list[list[np.ndarray]]:

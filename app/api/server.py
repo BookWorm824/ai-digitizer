@@ -249,7 +249,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                      fabric: str = Form("tshirt"), size_in: float | None = Form(None),
                      density: int = Form(0), inside: str = Form("auto"),
                      drop_text_mm: float = Form(0.0), letters: str = Form("auto"),
-                     ai_assist: str = Form("auto"),
+                     ai_assist: str = Form("auto"), garment: str = Form(""),
                      edits: str = Form("[]")):
     """Digitize either a version chosen on the Clean up screen (cleanup_id + version), or a
     picture uploaded directly (file + size + fabric)."""
@@ -295,7 +295,7 @@ async def create_job(cleanup_id: str | None = Form(None), version: str = Form("l
                               fit_w_mm=fit[0], fit_h_mm=fit[1], fabric_id=fabric,
                               max_colors=colors, density=density, hints=hints, inside=inside,
                               edits=edit_list, project=made, progress=say, letters=letters,
-                              ai_assist=assist,
+                              ai_assist=assist, garment=garment or None,
                               overrides={"drop_text_mm": drop_text_mm} if drop_text_mm else None)
         job["paths"] = {fmt: info.pop("path") for fmt, info in result["files"].items()}
         job["paths"]["preview"] = result.pop("preview")

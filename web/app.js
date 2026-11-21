@@ -515,6 +515,7 @@ async function startJob(force) {
   form.append('colors', String(state.colors));
   form.append('density', String(state.density));
   form.append('inside', state.inside);
+  form.append('garment', state.garment);
   form.append('drop_text_mm', String(state.dropTextMm));
   form.append('letters', state.letters);
   form.append('ai_assist', state.skipAi ? 'off' : state.aiAssist);
@@ -658,6 +659,16 @@ function setupCanvas() {
   sim.big.width = Math.round(cv.width * k);
   sim.big.height = Math.round(cv.height * k);
   sim.g = sim.big.getContext('2d');
+  // The thread is drawn on its own layer over the fabric-and-shadows layer, so a stitch's
+  // shadow always falls on the fabric and never on the thread sewn just before it (which
+  // drew dark streaks across fills and satin that aren't there in the sewing).
+  sim.top = document.createElement('canvas');
+  sim.top.width = sim.big.width;
+  sim.top.height = sim.big.height;
+  sim.tg = sim.top.getContext('2d');
+  sim.both = document.createElement('canvas');
+  sim.both.width = sim.big.width;
+  sim.both.height = sim.big.height;
   sim.k = k;
   sim.s = shown * k;                                     // pixels per millimetre while drawing
   sim.ox = (sim.big.width - (maxx - minx) * sim.s) / 2 - minx * sim.s;
@@ -671,6 +682,9 @@ function resetDrawing() {
   sim.g.fillRect(0, 0, sim.big.width, sim.big.height);
   sim.g.lineCap = 'round';
   sim.g.lineJoin = 'round';
+  sim.tg.clearRect(0, 0, sim.top.width, sim.top.height);
+  sim.tg.lineCap = 'round';
+  sim.tg.lineJoin = 'round';
   sim.drawn = 0;
   sim.cursor = { b: 0, sg: 0, p: 0 };
   sim.last = null;
@@ -681,7 +695,8 @@ function drawTo(n) {
   const r = state.result;
   n = Math.max(0, Math.min(sim.total, Math.round(n)));
   if (n < sim.drawn) resetDrawing();
-  const g = sim.g;
+  const g = sim.g;          // fabric and shadows
+  const t = sim.tg;         // thread
   const s = sim.s;
   // Thread is about 0.4 mm but flattens and spreads when sewn, closing the gaps between
   // rows, so it is drawn a touch wider: otherwise the underlay shows through as a grid.
@@ -711,18 +726,19 @@ function drawTo(n) {
     }
     g.stroke();
     g.globalAlpha = 1;
+    t.lineCap = 'round';
     for (let q = Math.max(1, c.p); q < end; q += 1) {
       const x0 = seg[(q - 1) * 2] * s + sim.ox; const y0 = seg[(q - 1) * 2 + 1] * s + sim.oy;
       const x1 = seg[q * 2] * s + sim.ox; const y1 = seg[q * 2 + 1] * s + sim.oy;
       const len = Math.hypot(x1 - x0, y1 - y0);
       if (len < 0.05 * s) continue;
       const lit = threadLight(Math.atan2(y1 - y0, x1 - x0));
-      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
-      g.strokeStyle = rgbStr(rgb, 0.84 * lit); g.lineWidth = lw; g.stroke();          // thread edge
-      g.strokeStyle = rgbStr(rgb, lit); g.lineWidth = lw * 0.86; g.stroke();          // thread
-      g.globalAlpha = 0.4;
-      g.strokeStyle = rgbStr(rgb, 1.25 * lit, 0.25); g.lineWidth = lw * 0.22; g.stroke(); // sheen
-      g.globalAlpha = 1;
+      t.beginPath(); t.moveTo(x0, y0); t.lineTo(x1, y1);
+      t.strokeStyle = rgbStr(rgb, 0.84 * lit); t.lineWidth = lw; t.stroke();          // thread edge
+      t.strokeStyle = rgbStr(rgb, lit); t.lineWidth = lw * 0.86; t.stroke();          // thread
+      t.globalAlpha = 0.4;
+      t.strokeStyle = rgbStr(rgb, 1.25 * lit, 0.25); t.lineWidth = lw * 0.22; t.stroke(); // sheen
+      t.globalAlpha = 1;
     }
     sim.drawn += end - c.p;
     sim.last = [seg[(end - 1) * 2], seg[(end - 1) * 2 + 1]];
@@ -754,7 +770,10 @@ function rgbStr(rgb, k, toWhite = 0) {
 // while the simulator is playing a single quick shrink is enough.
 function show(fine, needle) {
   const cv = $('#preview');
-  let src = sim.big;
+  const bg = sim.both.getContext('2d');
+  bg.drawImage(sim.big, 0, 0);
+  bg.drawImage(sim.top, 0, 0);
+  let src = sim.both;
   if (fine) {
     while (src.width > cv.width * 2) {
       const half = document.createElement('canvas');
@@ -964,10 +983,17 @@ function setupScreen3() {
     b.setAttribute('aria-label', 'Garment color ' + c);
     b.classList.toggle('on', c === state.garment);
     b.addEventListener('click', () => {
+      const before = state.garment;
       state.garment = c;
       renderDownload();
       box.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
       draw();
+      // Blank areas inside the design are sewn only when the garment isn't their color, so
+      // a new garment color can change the stitches (unless the user made that choice).
+      const r = state.result;
+      if (r && r.inside && r.inside.present && state.inside === 'auto' && c !== before) {
+        startJob(true);
+      }
     });
     box.appendChild(b);
   }

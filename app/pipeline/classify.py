@@ -55,7 +55,11 @@ END_MIN_MM = 0.6         # satin stops where the column gets narrower than this 
 GLYPH_MAX_COLUMNS = 6    # a letter needing more columns than this is not clean satin
 ROW_MEAN_COLUMNS = 4.0   # a word whose letters average more columns than this looks patched
 GLYPH_MAX_OVERLAP = 1.35 # ...nor one whose columns pile up on each other this much
-ROW_SATIN_SHARE = 0.85   # a word is satin only if nearly every letter is clean satin
+ROW_SATIN_SHARE = 1.0    # a word is satin only if every letter is clean satin: one fill
+                         # letter among satin ones is the first thing the eye catches
+HEAVY_LETTER_RATIO = 0.31   # strokes heavier than this x the letter height: fill, not satin
+FILL_TEXT_MM = 3.5       # traced letters with strokes at least this wide fill cleanly, so
+                         # they keep the picture's own lettering; thinner ones are retyped
 SERIF_SMALL_MM = 8.0     # under this cap height, hairline serifs are dropped (rule 5)
 NETWORK_HOLES = 3        # a narrow shape with this many openings is a web of outlines
 NETWORK_MAX_MM = 2.0     # ...and is sewn as lines when its strokes are thinner than this
@@ -624,6 +628,80 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
     return out
 
 
+def _dot(poly: Polygon, satin_max: float) -> dict | None:
+    """A small round dot as one satin column sewn straight across it: its two edges are the
+    two halves of the circle, so it sews as a clean round dot. (A tatami fill of a 3 mm dot
+    is a few one-stitch rows: it sews as a lumpy lozenge.)"""
+    if poly.interiors or poly.area <= 0:
+        return None
+    r = math.sqrt(poly.area / math.pi)
+    round_ = 4.0 * math.pi * poly.area / max(poly.length ** 2, 1e-9)
+    if round_ < 0.82 or not 0.6 <= r <= satin_max / 2.0:
+        return None
+    c = poly.centroid
+    if max(Point(x, y).distance(c) for x, y in poly.exterior.coords) > 1.25 * r:
+        return None
+    reach = max(0.6 * r, r - 0.15)                  # column ends push out about 0.15 mm
+    xs = np.linspace(-reach, reach, max(5, int(math.ceil(2 * reach / 0.25)) + 1))
+    half = np.sqrt(np.maximum(r * r - xs * xs, 0.0))
+    center = np.column_stack([c.x + xs, np.full_like(xs, c.y)])
+    left = np.column_stack([c.x + xs, c.y - half])
+    right = np.column_stack([c.x + xs, c.y + half])
+    return {"center": center, "half": half, "left": left, "right": right,
+            "outline": Point(c.x, c.y).buffer(r, quad_segs=16)}
+
+
+def _fit_fills_to_lines(objects: list) -> None:
+    """Where a color area is bordered by line art (a roof inside the building's outline), it
+    is made to end exactly under those lines. The traced area stops at the edge of the
+    drawn line and the line is straightened and sewn a thread wide, so otherwise the color
+    falls short of the line on one side and pokes out past it on the other."""
+    from shapely.ops import polygonize               # noqa: PLC0415
+    from shapely.strtree import STRtree              # noqa: PLC0415
+    lines = [LineString(seg) for o in objects if o["kind"] == "run" and o.get("route")
+             and o.get("seq") is None for seg in o["route"] if len(seg) >= 2]
+    fills = [o for o in objects if o["kind"] == "fill" and not o.get("texture")
+             and o.get("text_row") is None and o["poly"].geom_type == "Polygon"]
+    if not lines or not fills:
+        return
+    try:
+        faces = [f for f in polygonize(unary_union(lines)) if f.area >= 1.0]
+    except Exception:  # noqa: BLE001 - odd geometry: leave the fills as traced
+        return
+    if not faces:
+        return
+    tree = STRtree(faces)
+    for o in fills:
+        poly = o["poly"]
+        take = [faces[i] for i in tree.query(poly)
+                if faces[i].intersection(poly).area >= 0.6 * faces[i].area]
+        if not take:
+            continue
+        new = unary_union(take).buffer(0)
+        if new.geom_type != "Polygon":
+            continue
+        if new.intersection(poly).area < 0.75 * poly.area or new.area > 1.5 * poly.area:
+            continue
+        o["poly"], o["area_mm2"] = new, float(new.area)
+
+
+def _ground(shapes: dict, inside: int, skip: set, reach: float) -> list:
+    """The blank areas that are sewn, as a digitizer lays them: one ground fill running under
+    the outlines and small details that sit on it (anything up to 2 x `reach` wide), not a
+    patchwork of separate pieces butted against every line. It stays half a millimetre
+    inside the design's outer edge, so it never peeks out past an outline, and keeps holes
+    where wide areas of another color will be filled."""
+    blanks = [p for i, p in enumerate(shapes[inside]) if (inside, i) not in skip]
+    if not blanks:
+        return []
+    others = [p for c, polys in shapes.items() if c != inside for p in polys]
+    merged = unary_union(blanks).buffer(reach, quad_segs=4).buffer(-reach, quad_segs=4)
+    if others:
+        whole = unary_union(blanks + others).buffer(-0.5, quad_segs=4)
+        merged = merged.intersection(whole)
+    return [p for p in polygons_of(merged.buffer(0)) if p.area >= 4.0]
+
+
 def _cover_text_scraps(objects: list, shapes: dict, done: set, fits: dict) -> None:
     """Pieces of traced letters that never joined their row (a merged "BI", the dot of a
     small "i") would be sewn as solid blobs over the retyped words. A leftover shape of the
@@ -715,6 +793,10 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     use_satin = rules.get("satin", True)
 
     order = sewing_order(vec["layers"], rules["satin_max_mm"])
+    if vec.get("inside_color") in order:
+        # blank areas that are sewn are the design's ground: first, under everything else
+        order.remove(vec["inside_color"])
+        order.insert(0, vec["inside_color"])
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
     textures = _foliage(shapes, plan)
     rows = text_rows(shapes, order, rules)
@@ -765,17 +847,6 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             objects.append(o)
         return True
 
-    def add_edge(poly, color):
-        """A crisp edge on fill lettering: a bean run around the letter, sewn after its fill,
-        which hides the uneven ends of the fill rows (Jeff Fuller: fill letters get an outline
-        sewn with them; deep-dive rule 24)."""
-        for part in polygons_of(poly.buffer(-0.15)):
-            for ring in [part.exterior, *part.interiors]:
-                line = LineString(ring.coords)
-                if line.length >= 2.0:
-                    objects.append({"kind": "run", "color": color, "line": line, "width_mm": 0.6,
-                                    "bean": True, "stitch_mm": 1.8, "edge": True})
-
     def add_texture(poly, color, angle=None, ink=1.0):
         """Foliage: one soft, textured mass (stitch.stitch_texture). Small gaps inside it
         are filled; only real openings stay open."""
@@ -818,6 +889,11 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         """A part that is narrow all over: satin if it is a real column, bean lines if it is
         thin or a web of outlines, otherwise a fill."""
         nonlocal dropped
+        dot = _dot(part, rules["satin_max_mm"]) if use_satin else None
+        if dot:
+            # (little pull compensation: a dot stretched along its stitches sews as an oval)
+            add_satin([dot], color, {"comp_scale": 0.5, "underlay": "none"})
+            return
         w = typical_width(part)
         if w < satin_min or (len(part.interiors) >= NETWORK_HOLES and w < NETWORK_MAX_MM):
             if add_network(part, color) or add_lines(part, color):
@@ -840,7 +916,9 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     done = set()
     inside = vec.get("inside_color")
     if inside is not None and inside in shapes and rows:
-        hulls = [Polygon(shapes[c][i].exterior).buffer(0.3) for c, i in rows]
+        # (blank shapes that line up in a row themselves are not letters to sit inside:
+        # each would be "inside" its own outline and none would ever be sewn)
+        hulls = [Polygon(shapes[c][i].exterior).buffer(0.3) for c, i in rows if c != inside]
         for i, blank in enumerate(shapes[inside]):
             if any(h.contains(blank) for h in hulls):
                 done.add((inside, i))
@@ -864,6 +942,11 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         passing = [len(t[3]) for t in tried if t[3]]
         if passing and np.mean(passing) > ROW_MEAN_COLUMNS:
             satin_share = 0.0            # heavy serif lettering: a clean fill beats a patchwork
+        stroke = float(np.median([typical_width(g) for _c, _i, g in glyphs]))
+        if stroke > HEAVY_LETTER_RATIO * height and not small:
+            # Extra-bold letters are more junction than stroke: columns cut out of them
+            # come out as stubby wedges (an M like a starburst). They are filled instead.
+            satin_share = 0.0
         if satin_share >= ROW_SATIN_SHARE:
             mode = "satin"
         elif small:
@@ -892,8 +975,10 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             elif mode == "lines" and add_lines(g, c, stitch_mm=1.5, min_len=0.8):
                 pass
             else:
-                add_fill(g, c, angle, style)
-                add_edge(g, c)
+                # A crisp edge on fill lettering: a bean run around the letter, sewn straight
+                # after its fill in the same thread, hides the uneven ends of the fill rows
+                # (Jeff Fuller: fill letters get an outline sewn with them; rule 24).
+                add_fill(g, c, angle, dict(style or {}, edge=True))
             done.add((c, i))
 
     def follow_plan(poly, color) -> bool:
@@ -956,7 +1041,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 # and a satin font beats ragged fill on 2-6 mm strokes.
                 mode, _tried = plan_row(info["row"], row_keys[info["row"]], h)
                 stroke = float(np.median([typical_width(g) for g in info["glyphs"]]))
-                want = mode == "fill" and stroke <= rules["satin_max_mm"]
+                want = mode == "fill" and stroke < FILL_TEXT_MM
             if not want:
                 continue
             if h >= lettering.SERIF_MIN_MM and lettering.has_serifs(info["glyphs"]):
@@ -984,15 +1069,24 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     for color, mass, ink in textures:
         add_texture(mass, color, ink=ink)
     for info in row_info:
-        row, height = info["row"], info["height"]
-        keys = row_keys[row]
-        if text and info["color"] == inside and row not in fits and not lettering.fit_row(
+        if text and info["color"] == inside and info["row"] not in fits and not lettering.fit_row(
                 info["glyphs"], text, "block", rules["satin_max_mm"]):
             # Blank areas shut inside the design (the walls between a building's windows)
             # can line up like letters. When the words are known and these spell none of
             # them, they are not lettering: sew them as ordinary shapes.
             info["text"] = None
             info["not_text"] = True
+    if inside is not None and inside in shapes:
+        lettering_keys = {k for i in row_info if i["color"] == inside and not i.get("not_text")
+                          for k in row_keys[i["row"]]}
+        for part in _ground(shapes, inside, done | lettering_keys, satin_half):
+            add_fill(part, inside)
+        done.update((inside, i) for i in range(len(shapes[inside]))
+                    if (inside, i) not in lettering_keys)
+    for info in row_info:
+        row, height = info["row"], info["height"]
+        keys = row_keys[row]
+        if info.get("not_text"):
             continue
         if height < rules.get("drop_text_mm", 0.0) or row in absorbed:
             done.update(keys)          # left out by choice, or set as part of a whole line
@@ -1036,9 +1130,25 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             for piece in polygons_of(rest):
                 # Corner trimmings and edge slivers hug the area along much of their outline;
                 # a real arm or outline only touches it at one end.
-                hug = piece.boundary.intersection(edge).length / max(piece.length, 1e-9)
-                if not (typical_width(piece) < FRINGE_MM or piece.area < min_area or hug > 0.3):
-                    arms.append(piece)
+                touch = piece.boundary.intersection(edge)
+                hug = touch.length / max(piece.length, 1e-9)
+                if typical_width(piece) < FRINGE_MM or piece.area < min_area or hug > 0.3:
+                    continue
+                # A narrow part that joins the area in two places, or has holes in it (the
+                # strips around letters knocked out of a banner), is part of the area: one
+                # fill with holes. Cut into satin columns it sews as a patchwork of scraps.
+                # Only a clean single band (a handle) is still sewn as its own column.
+                # (Thin line work hanging off an area, a building's outlines beside its solid
+                # trees, is not this case: it is sewn as lines whatever it joins.)
+                joins = len(polygons_of(touch.buffer(0.4)))
+                wp = typical_width(piece)
+                lines = wp < satin_min or (len(piece.interiors) >= NETWORK_HOLES
+                                           and wp < NETWORK_MAX_MM)
+                if (joins >= 2 or piece.interiors) and not lines:
+                    cols = try_satin(piece, rules) if use_satin else None
+                    if not cols or len(cols) > 1:
+                        continue
+                arms.append(piece)
             # the area is everything that isn't a real arm (corner trimmings stay with it)
             core = poly.difference(unary_union(arms).buffer(0.05)) if arms else poly
             for part in polygons_of(core.buffer(0)):
@@ -1052,6 +1162,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     bounds = vec.get("bounds") or unary_union(
         [q for layer in vec["layers"] for q in layer["polys"]]).bounds
     _match_mirrors(objects, bounds)
+    _fit_fills_to_lines(objects)
 
     if debug_dir is not None and objects:
         debug_picture(objects, debug_dir)
