@@ -804,6 +804,20 @@ def _round_openings(piece: Polygon) -> list:
     return out
 
 
+def _web_blobs(poly: Polygon) -> list:
+    """Solid masses in a web of thin outlines: parts at least four line-widths across (and
+    at least 3 mm), e.g. a tree drawn touching a building. Empty for an ordinary web."""
+    if len(poly.interiors) < NETWORK_HOLES:
+        return []
+    tw = typical_width(poly)
+    r = max(1.5, 2.0 * tw)
+    core = poly.buffer(-r, quad_segs=4)
+    if core.is_empty:
+        return []
+    blobs = core.buffer(r * 1.05, quad_segs=4).intersection(poly)
+    return [b for b in polygons_of(blobs.buffer(0)) if b.area >= 12.0]
+
+
 BLOCK_MIN_MM = 0.9     # the narrowest block that can be filled (two or three rows of thread)
 
 
@@ -1335,7 +1349,18 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 dropped += 1            # a thin gap between parts is open fabric, not thread
                 continue
             if poly.buffer(-satin_half).is_empty:          # narrow all over
-                sew_narrow(poly, color)
+                blobs = _web_blobs(poly)
+                if not blobs:
+                    sew_narrow(poly, color)
+                    continue
+                # A web of thin outlines with solid masses joined to it (trees touching a
+                # building): the masses are filled, the outlines sewn as lines around them.
+                for b in blobs:
+                    add_fill(b, color)
+                rest = poly.difference(unary_union(blobs).buffer(0.05))
+                for part in polygons_of(rest):
+                    if part.area >= min_area:
+                        sew_narrow(part, color)
                 continue
             # Parts wider than satin can carry are filled. What is left over are narrow arms
             # and outlines hanging off them: sewn as satin, bean lines or fill on their own.
