@@ -404,6 +404,7 @@ class Placement:
     def __init__(self, ch, bx, by, H, w, k=1.0, run=False):
         self.ch, self.bx, self.by, self.H, self.w, self.k = ch, bx, by, H, w, k
         self.run = run          # sew as a fine bean line (light lettering) even if big enough
+        self.heavy = False      # retyped from bold lettering: a running-stitch letter is sewn bold
         self.s = max(H - w, 0.3 * H)
 
     def xy(self, x, y):
@@ -791,6 +792,7 @@ def _as_line(pl: Placement) -> Placement:
     if pl.w <= LINE_W_MM + 1e-6:
         return pl
     q = Placement(pl.ch, 0.0, pl.by, pl.H, LINE_W_MM, pl.k, True)
+    q.heavy = pl.heavy
     gw = GLYPHS[pl.ch]["width"]
     if gw > 0.05:
         # Half the room the satin stroke took is given back to the gap between letters:
@@ -845,7 +847,9 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
     out = []
     for k, route in enumerate(_letter_tours(lines)):
         o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)), "route": route,
-             "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
+             # (out once and back as a bean: from 4.5 mm, or smaller when the art's own
+             # lettering is bold, which as a plain two-pass line loses all its weight)
+             "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5 or pl.heavy,
              # tiny letters need short stitches or their curves turn into corners (a 2 mm
              # "9" sewn in 1.25 mm stitches looks like ">")
              # (a 3 mm "O" in 1.2 mm stitches is a hexagon)

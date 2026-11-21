@@ -65,6 +65,7 @@ SERIF_SMALL_MM = 8.0     # under this cap height, hairline serifs are dropped (r
 NETWORK_HOLES = 3        # a narrow shape with this many openings is a web of outlines
 NETWORK_MAX_MM = 2.0     # ...and is sewn as lines when its strokes are thinner than this
 GLYPH_STROKE_RATIO = 0.42  # stroke width / height of a letter (a solid square is 0.5)
+BOLD_TEXT_STROKE = 0.2   # traced letters with strokes this share of their height are bold
 RETYPE_AUTO_MM = 8.0     # "auto" retypes known words shorter than this (research rules 5, 6)
 
 
@@ -1503,6 +1504,9 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         if fit:
             info["text"] = fit["text"]
             pls = fit["placements"]
+            stroke = float(np.median([lettering.stroke_width(g) for g in info["glyphs"]]))
+            for pl in pls:
+                pl.heavy = stroke >= BOLD_TEXT_STROKE * height
             objects.extend(lettering.objects(pls, info["color"], rules, fit.get("style", "block"),
                                              lettering.text_style(pls[0].H), group=row, row=row))
             done.update(keys)

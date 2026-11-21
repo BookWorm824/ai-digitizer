@@ -33,6 +33,7 @@ from .common import dist
 
 ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinary stitch
 BLOCK_OPEN_MM = 0.4        # ... but beside small blocks only this much: the gap is the design
+OTHER_COLOR_MARGIN_MM = 0.3  # thread under another color stays this far inside its edges
 COVER_PAD_MM = 0.15        # stitching hides thread this far past its own edge (thread spread)
 ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
 ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
@@ -98,6 +99,33 @@ def _extent(o: dict) -> tuple:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _centre_out(lettered: list, cx: float) -> list:
+    """Letters of each word in cap order (Erich Campbell, Jeff Fuller): from the letter
+    nearest the centre seam outward to the left, then from the centre outward to the right.
+    Each letter keeps its own stroke order."""
+    out = []
+    by_word: dict = {}
+    for o in lettered:
+        by_word.setdefault(o["seq"][0], []).append(o)
+    for word in by_word.values():
+        letters: dict = {}
+        for o in word:
+            letters.setdefault(o["seq"][1], []).append(o)
+        mid = {li: (lambda e: (e[0] + e[2]) / 2)(_extent_all(objs)) for li, objs in letters.items()}
+        idx = sorted(letters)
+        centre = min(idx, key=lambda li: abs(mid[li] - cx))
+        order = [li for li in reversed(idx) if li <= centre] + [li for li in idx if li > centre]
+        for li in order:
+            out.extend(letters[li])
+    return out
+
+
+def _extent_all(objs: list) -> tuple:
+    boxes = [_extent(o) for o in objs]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
 def _nearest_first(group: list, pos):
     """Objects of one kind, each time going to whichever starts nearest. Returns
     ([(thread segment, the object's shape)] in order, where the needle ends up)."""
@@ -112,10 +140,14 @@ def _nearest_first(group: list, pos):
                 best = (d, o, False)
             if o["reversible"] and pos is not None and dist(pos, end) < best[0]:
                 best = (dist(pos, end), o, True)
+            if o.get("alt") and pos is not None and dist(pos, o["alt"][0][0]) < best[0]:
+                best = (dist(pos, o["alt"][0][0]), o, "alt")   # a column from its other end
         _, o, rev = best
         group.remove(o)
         segs = o["segments"]
-        if rev:
+        if rev == "alt":
+            segs = o["alt"]
+        elif rev:
             segs = [sg[::-1] for sg in segs[::-1]]
         out.extend((sg, o.get("shape")) for sg in segs)
         pos = segs[-1][-1]
@@ -144,8 +176,21 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         ally = [v for o in objects for v in (_extent(o)[1], _extent(o)[3])]
         cx = (min(allx) + max(allx)) / 2
 
+        # A word is one piece: banded letter by letter, the needle crossed the word back and
+        # forth and cut at nearly every letter. It is banded by its whole extent and sewn
+        # from its centre letter outward (below).
+        words: dict = {}
+        for o in objects:
+            if o.get("seq") is not None:
+                x0, _, x1, _ = _extent(o)
+                w = words.setdefault(o["seq"][0], [x0, x1])
+                w[0], w[1] = min(w[0], x0), max(w[1], x1)
+
         def band(o):
-            x0, _, x1, _ = _extent(o)
+            if o.get("seq") is not None:
+                x0, x1 = words[o["seq"][0]]
+            else:
+                x0, _, x1, _ = _extent(o)
             if x0 <= cx <= x1:                       # straddles the centre line
                 return 0
             return int(min(abs(x0 - cx), abs(x1 - cx)) // CAP_BAND_MM) + 1
@@ -156,41 +201,48 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
     else:
         groups = [objects]
         pos = None
+        cx = None
 
+    # (Tried: on caps under 3 inches wide, each color sewn once, centre-out. Fewer color
+    # changes, but heavy black outlines sewn after every orange part covered the thin roofs
+    # and the orange travel peeked out beside them. Bands from the centre keep each part's
+    # own layering, and color changes are cheap on a multi-needle machine.)
+    passes = [(g, c) for g in groups for c in colors]
     raw_blocks: list = []                            # [color, [segments]]
-    for group in groups:
-        for color in colors:
-            segs: list = []
-            for kind in KIND_ORDER:
-                mine = [o for o in group if o["color"] == color and o["kind"] == kind]
-                # lettering is sewn in its own order: letter by letter, left to right, each
-                # letter's strokes as the font planned them (research rule 36)
-                lettered = sorted((o for o in mine if o.get("seq") is not None),
-                                  key=lambda o: o["seq"])
-                last, last_punct = None, False
-                for o in lettered:
-                    first, *rest = o["segments"]
-                    letter = o["seq"][:2]
-                    # a short hop to the next letter may be sewn through, except next to
-                    # punctuation (a period joined to its letter reads as a comma)
-                    # ... and thin running-stitch letters are never joined to each other: a
-                    # connecting stitch is as heavy as their own lines and changes how
-                    # they read (E_S_T). Satin letters are joined at their closest points.
-                    fresh = letter != last and (o.get("punct") or last_punct or o.get("thin"))
-                    segs.append((_NewLetter(first) if fresh else first, o.get("shape")))
-                    segs.extend((sg, o.get("shape")) for sg in rest)
-                    if letter != last:
-                        last_punct = bool(o.get("punct"))
-                    last = letter
-                    pos = o["segments"][-1][-1]
-                part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)
-                segs.extend(part)
-            if not segs:
-                continue
-            if raw_blocks and raw_blocks[-1][0] == color:
-                raw_blocks[-1][1].extend(segs)
-            else:
-                raw_blocks.append([color, segs])
+    for group, color in passes:
+        segs: list = []
+        for kind in KIND_ORDER:
+            mine = [o for o in group if o["color"] == color and o["kind"] == kind]
+            # lettering is sewn in its own order: letter by letter, left to right, each
+            # letter's strokes as the font planned them (research rule 36)
+            lettered = sorted((o for o in mine if o.get("seq") is not None),
+                              key=lambda o: o["seq"])
+            if cx is not None and lettered:
+                lettered = _centre_out(lettered, cx)
+            last, last_punct = None, False
+            for o in lettered:
+                first, *rest = o["segments"]
+                letter = o["seq"][:2]
+                # a short hop to the next letter may be sewn through, except next to
+                # punctuation (a period joined to its letter reads as a comma)
+                # ... and thin running-stitch letters are never joined to each other: a
+                # connecting stitch is as heavy as their own lines and changes how
+                # they read (E_S_T). Satin letters are joined at their closest points.
+                fresh = letter != last and (o.get("punct") or last_punct or o.get("thin"))
+                segs.append((_NewLetter(first) if fresh else first, o.get("shape")))
+                segs.extend((sg, o.get("shape")) for sg in rest)
+                if letter != last:
+                    last_punct = bool(o.get("punct"))
+                last = letter
+                pos = o["segments"][-1][-1]
+            part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)
+            segs.extend(part)
+        if not segs:
+            continue
+        if raw_blocks and raw_blocks[-1][0] == color:
+            raw_blocks[-1][1].extend(segs)
+        else:
+            raw_blocks.append([color, segs])
 
     blocks = []
     for o in base:
@@ -201,15 +253,22 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
     # Thread may also hide under a later color only if that color is not lighter: dark
     # thread under a light fill shows through.
     thin_shapes = {id(o["shape"]) for o in objects if o.get("thin") and o.get("shape") is not None}
+    # (lettering kept as drawn counts too: its letters are joined like a font's, never cut
+    # inside the word; tutorials: only gaps over 3 mm between letters are trimmed)
     letter_shapes = {id(o["shape"]) for o in objects
-                     if o.get("seq") is not None and o.get("shape") is not None}
+                     if o.get("shape") is not None and (
+                         o.get("seq") is not None
+                         or (o.get("text_row") is not None and o["kind"] in ("satin", "fill")))}
     block_shapes = {id(o["shape"]) for o in objects if o.get("block") and o.get("shape") is not None}
     order_shapes, order_colors, order_thin, order_letter, order_of = [], [], [], [], {}
-    order_block = []
+    order_block, order_inner = [], []
     for n, (color_n, raw_segments) in enumerate(raw_blocks):
         for j, (_sg, shape) in enumerate(raw_segments):
             order_of[(n, j)] = len(order_shapes)
             order_shapes.append(shape.buffer(COVER_PAD_MM) if shape is not None else None)
+            # (another color hides thread only well inside its edges: travel along the edge
+            # of a black outline peeks out beside it)
+            order_inner.append(shape.buffer(-OTHER_COLOR_MARGIN_MM) if shape is not None else None)
             order_colors.append(color_n)
             order_thin.append(id(shape) in thin_shapes)
             order_letter.append(id(shape) in letter_shapes)
@@ -228,10 +287,18 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
             return []
         near = [indexed[i] for i in tree.query(line)]
         # same color: any later stitching hides it (even a line sewn along the same path);
-        # another color: only solid stitching that is not lighter
-        return [g for kk, g in near if kk >= k and (
-            order_colors[kk] == color
-            or (not order_thin[kk] and lum(order_colors[kk]) <= lum(color) + 20))]
+        # another color: only solid stitching that is not lighter, well inside its edges
+        out = []
+        for kk, g in near:
+            if kk < k:
+                continue
+            if order_colors[kk] == color:
+                out.append(g)
+            elif not order_thin[kk] and lum(order_colors[kk]) <= lum(color) + 20:
+                inner = order_inner[kk]
+                if inner is not None and not inner.is_empty:
+                    out.append(inner)
+        return out
 
     def hidden_by_later(line, k, color):
         later = covers(k, color, line)

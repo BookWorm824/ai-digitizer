@@ -115,3 +115,34 @@ def test_mirrored_lines_are_sewn_alike():
     ]
     classify._match_mirror_lines(objs, (-20, 0, 20, 20), 1.1)
     assert bool(objs[0].get("satin_w")) == bool(objs[1].get("satin_w"))
+
+
+def test_bold_lettering_sews_small_outline_letters_bold():
+    pls = lettering.layout("EST", 3.5, 0, 0, "block")
+    for pl in pls:
+        pl.heavy = True
+    objs = lettering.objects(pls, 0, RULES, "block", lettering.text_style(3.5), group=0, row=0)
+    runs = [o for o in objs if o["kind"] == "run" and not o.get("punct")]
+    assert runs and all(o["bold"] for o in runs)
+    plain = lettering.objects(lettering.layout("EST", 3.5, 0, 0, "block"), 0, RULES, "block",
+                              lettering.text_style(3.5), group=0, row=0)
+    assert not any(o["bold"] for o in plain if o["kind"] == "run")
+
+
+def test_a_word_on_a_cap_is_sewn_whole_from_its_centre_letter_outward():
+    pls = lettering.layout("TENNESSEE", 7.0, 0.0, 0.0, "block")
+    objs = lettering.objects(pls, 0, RULES, "block", lettering.text_style(7.0), group=0, row=0)
+    st = stitch.run({"objects": objs, "order": [0]}, RULES)
+    plan = sequence.run(st, [(250, 100, 0)], RULES, [0])
+    # one color block, and few cuts: the word is not split across the centre bands (sewn
+    # centre-out, each letter of the left half is still cut: they are planned left to right)
+    assert len(plan["blocks"]) == 1
+    assert plan["trims"] <= 5
+    xs = [x for o in st["objects"] for sg in o["segments"] for x, _y in sg]
+    letters = sequence._centre_out([o for o in st["objects"] if o.get("seq")],
+                                   (min(xs) + max(xs)) / 2.0)
+    firsts = []
+    for o in letters:
+        if not firsts or firsts[-1] != o["seq"][1]:
+            firsts.append(o["seq"][1])
+    assert firsts[0] == 4 and firsts[:5] == [4, 3, 2, 1, 0] and firsts[5:] == [5, 6, 7, 8]

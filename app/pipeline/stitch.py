@@ -951,6 +951,7 @@ def knockdown(objects: list, rules: dict) -> dict | None:
 def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     stitched = []
     for obj in classified["objects"]:
+        alt = None
         if obj["kind"] == "run" and obj.get("route"):
             # line art: one thread out along every branch and back over the same holes
             widths = obj.get("satin_w")
@@ -976,6 +977,15 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
         elif obj["kind"] == "satin":
             segments = stitch_satin(obj, rules)
             shape = obj["outline"]
+            if obj.get("seq") is None and not obj.get("block") and segments:
+                # the same column sewn from its other end, so the sewing order can enter
+                # it from whichever end is nearer (letters of a traced word joined, not cut)
+                back = dict(obj, center=np.asarray(obj["center"])[::-1],
+                            half=np.asarray(obj["half"])[::-1])
+                if obj.get("left") is not None and obj.get("right") is not None:
+                    back["left"] = np.asarray(obj["right"])[::-1]
+                    back["right"] = np.asarray(obj["left"])[::-1]
+                alt = stitch_satin(back, rules)
             if obj.get("block") and segments:
                 # a small block starts and ends at the middle of its two ends (the extra half
                 # stitch lies along the end stitch, unseen): the hop to the next window in a
@@ -1003,6 +1013,8 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
                              "seq": obj.get("seq"), "punct": obj.get("punct", False),
                              # small solid parts (windows, panels): the gaps between them
                              # are part of the design, so no thread may bridge them
+                             "text_row": obj.get("text_row"),
+                             "alt": alt,
                              "block": bool(obj.get("block")) or (
                                  obj["kind"] == "fill" and not obj.get("texture")
                                  and obj.get("text_row") is None and obj.get("seq") is None
