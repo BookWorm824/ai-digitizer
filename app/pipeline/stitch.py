@@ -106,6 +106,47 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
     return out
 
 
+def _outline_satin(route: list, widths: list, rules: dict):
+    """The satin for the return pass of each edge of an outline web (see
+    linenet.route_points). Each column runs from junction to junction along the cleaned-up
+    centre line, at the width the line was drawn. Ends are carried past the junction so
+    corners close and joins lap: half a width at a corner, half a millimetre where a line
+    butts into others, nothing at a loose end."""
+    from . import lettering                       # noqa: PLC0415 - avoid a circular import
+    least = rules.get("satin_net_min_mm", 1.1)
+    most = rules.get("satin_max_mm", 7.0)
+    seen, degree = set(), {}
+    for poly in route:
+        a, b = tuple(np.round(poly[0], 3)), tuple(np.round(poly[-1], 3))
+        if (a, b) in seen or (b, a) in seen:
+            continue
+        seen.add((a, b))
+        for e in (a, b):
+            degree[e] = degree.get(e, 0) + 1
+
+    def past(end, w):
+        d = degree.get(tuple(np.round(end, 3)), 1)
+        return 0.0 if d <= 1 else (w / 2.0 if d == 2 else min(w / 2.0, 0.5))
+
+    def satin(k, poly):
+        w = widths[k] if k < len(widths) else 0.0
+        if w <= 0 or len(poly) < 2:
+            return None
+        w = min(w, most)
+        loose = min(degree.get(tuple(np.round(poly[0], 3)), 1),
+                    degree.get(tuple(np.round(poly[-1], 3)), 1)) <= 1
+        if loose and LineString(poly).length < 2.5 * w:
+            return None                 # a stub: as satin it would be a blob, not a line
+        col = lettering.column(poly, w, ("ext", past(poly[0], w)), ("ext", past(poly[-1], w)))
+        if not col:
+            return None
+        # (half the usual pull compensation: full compensation on every line of a web makes
+        # the whole drawing heavier than it was drawn)
+        segs = stitch_satin(dict(col, underlay="none", comp_scale=0.5), rules)
+        return segs[0] if segs and len(segs[0]) > 3 else None
+    return satin
+
+
 def bean(points: list) -> list:
     """Triple run: forward, back, forward over every stitch, for a bolder line."""
     if len(points) < 2:
@@ -220,6 +261,7 @@ def stitch_satin(obj: dict, rules: dict) -> list:
         kind = "none"
     pts: list = []
     top_forward = True
+    mid = (edge_l + edge_r) / 2
     if kind in ("edge", "edge_zigzag"):
         pts += run_along(in_left, True) + run_along(in_right, False)
         if kind == "edge_zigzag":
@@ -228,8 +270,18 @@ def stitch_satin(obj: dict, rules: dict) -> list:
             top_forward = True                       # edge runs end back where they began
         top_forward = kind != "edge_zigzag"
     elif kind == "center":
-        pts += run_along((edge_l + edge_r) / 2, True)
+        pts += run_along(mid, True)
         top_forward = False
+    # Lettering plans where each stroke must end ("finish": at its "far" end, or back at
+    # its "start") so the thread can go straight on to the next stroke. One more underlay
+    # pass along the centre puts the needle at the right end for the top stitching.
+    finish = obj.get("finish")
+    if finish == "start" and top_forward:
+        pts += run_along(mid, True)
+        top_forward = False
+    elif finish == "far" and not top_forward:
+        pts += run_along(mid, False)
+        top_forward = True
     spacing = satin_spacing(width, rules) * obj.get("spacing_scale", 1.0)
     pts += zigzag(left, right, spacing, top_forward, short=True)
     satin_max = rules.get("satin_max_mm", 7.0)
@@ -387,6 +439,7 @@ class _Router:
         self.light = light
         self.rings = None
         self.loose = None
+        self.exact = None
         minx, miny, maxx, maxy = shape.bounds
         self.cell = max(0.5, max(maxx - minx, maxy - miny) / 220.0)
         self.minx, self.miny = minx, miny
@@ -439,6 +492,24 @@ class _Router:
             return list(substring(ring, s0, total).coords) + list(substring(ring, 0.0, s1).coords)
         pts = walk(a, b) if fwd <= total - fwd else walk(b, a)[::-1]
         return [p] + [(float(x), float(y)) for x, y in pts] + [q]
+
+    def pulled_in(self, path) -> list:
+        """The same route with any point that strayed just outside the shape (grid cells are
+        coarse) moved onto its edge: travel stitches never show past the outline."""
+        if self.exact is None:
+            self.exact = prep(self.shape)
+        out = [path[0]]
+        for pt in path[1:-1]:
+            if not self.exact.contains(Point(pt)):
+                on = self.shape.exterior.interpolate(self.shape.exterior.project(Point(pt)))
+                for ring in self.shape.interiors:
+                    c = ring.interpolate(ring.project(Point(pt)))
+                    if c.distance(Point(pt)) < on.distance(Point(pt)):
+                        on = c
+                pt = (on.x, on.y)
+            out.append(pt)
+        out.append(path[-1])
+        return out
 
     def stays_in(self, path) -> bool:
         """Does every hop of a route stay on the shape (give or take a grid cell)? The grid
@@ -539,6 +610,7 @@ def _travel(p, q, inside, router: _Router, step: float):
                 path = router.along_edge(p, q)
         if path is None:
             return None
+        path = router.pulled_in(path)
     out = []
     for a, b in zip(path, path[1:]):
         n = max(1, math.ceil(dist(a, b) / step))
@@ -546,6 +618,14 @@ def _travel(p, q, inside, router: _Router, step: float):
                    for k in range(1, n + 1))
     return out[:-1]
 
+
+# "Fill spacing" (0.40-0.45 mm) is the digitizing-software number: the distance from one
+# forward row to the next, with a return row lying between them. The thread lines of a
+# solid fill are therefore half that apart, about 0.2 mm, the same thread per millimetre as
+# a satin at 0.4. (Measured on finished production files with tools/study.py: rows 0.19 to
+# 0.22 mm apart. Sewing rows a full "spacing" apart gives a half-density fill the fabric
+# shows through.)
+ROW_SHARE = 0.5
 
 FILL_ANGLES = (18.0, 162.0)   # deep-dive rule 38: 15-20 deg off level (or its mirror), never
                               # 45 deg (the fabric stretches on the bias), never upright
@@ -694,8 +774,8 @@ def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
                                       rules["fill_stitch_mm"], start)
                 _append(segments, under, cover, router)
     start = segments[-1][-1] if segments else None
-    top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"], rules["fill_stitch_mm"],
-                        start, extend=extend)
+    top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"] * ROW_SHARE,
+                        rules["fill_stitch_mm"], start, extend=extend)
     _append(segments, top, cover, router)
     if obj.get("edge") and segments:
         _outline(segments, poly, rules)
@@ -751,7 +831,8 @@ def stitch_texture(obj: dict, rules: dict) -> list:
     # half-density layers so the fabric shows through). A light drawing gets an even more
     # open layer. "solid" textures (fur, a texture the user asked for) may use both layers.
     ink = float(min(obj.get("max_ink", 0.55), max(0.2, obj.get("ink", 1.0))))
-    spacing = rules["fill_spacing_mm"] * 2.5 if ink >= 0.6 else min(2.5, rules["fill_spacing_mm"] / ink)
+    solid = rules["fill_spacing_mm"] * ROW_SHARE          # row gap of a solid fill
+    spacing = solid * 2.5 if ink >= 0.6 else min(2.5, solid / ink)
     turns = (0.0, TEXTURE["second_turn"]) if ink >= 0.6 else (0.0,)
     cover = prep(poly.buffer(INSIDE_TOL_MM))
     light = ink < 0.6
@@ -837,11 +918,13 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
     for obj in classified["objects"]:
         if obj["kind"] == "run" and obj.get("route"):
             # line art: one thread out along every branch and back over the same holes
+            widths = obj.get("satin_w")
             pts = route_points(obj["route"], run_points,
                                dict(rules, run_stitch_mm=obj.get("stitch_mm") or rules.get("line_stitch_mm", 2.0)),
-                               bean if obj.get("bold") else None)
+                               bean if obj.get("bold") else None,
+                               _outline_satin(obj["route"], widths, rules) if widths else None)
             segments = [pts] if len(pts) > 1 else []
-            shape = obj["line"].buffer(0.4)
+            shape = obj["line"].buffer(max(0.4, max(widths) / 2.0) if widths else 0.4)
         elif obj["kind"] == "run":
             step = obj.get("stitch_mm") or (rules["bean_stitch_mm"] if obj["bean"] else None)
             pts = run_points(obj["line"], dict(rules, run_stitch_mm=step) if step else rules)
@@ -869,7 +952,9 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             stitched.append({"kind": obj["kind"], "color": obj["color"], "segments": segments,
                              "reversible": obj["kind"] == "run" and obj.get("seq") is None,
                              "shape": shape, "area_mm2": obj.get("area_mm2", 0.0),
-                             "seq": obj.get("seq"), "punct": obj.get("punct", False)})
+                             "seq": obj.get("seq"), "punct": obj.get("punct", False),
+                             # a line a thread or two wide hides nothing sewn under it
+                             "thin": obj["kind"] == "run" and not obj.get("satin_w")})
     if rules.get("knockdown") and stitched:
         base = knockdown(classified["objects"], rules)
         if base:

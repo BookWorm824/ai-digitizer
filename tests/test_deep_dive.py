@@ -111,13 +111,51 @@ def test_thin_lines_are_running_stitch_not_skinny_satin():
     assert kinds == ["run"]
 
 
-def test_bold_lines_get_four_passes():
-    objs = classify.run({"layers": [{"color": 0, "rgb": (0, 0, 0), "polys": [box(0, 0, 30, 1.2)]}],
-                         "bounds": (0, 0, 30, 1.2)}, RULES)["objects"]
-    assert objs[0]["bold"]
-    pts = stitch.run({"objects": objs, "order": [0]}, RULES)["objects"][0]["segments"][0]
+def _bar(width):
+    return {"layers": [{"color": 0, "rgb": (0, 0, 0), "polys": [box(0, 0, 30, width)]}],
+            "bounds": (0, 0, 30, width)}
+
+
+def test_bold_lines_are_a_narrow_satin_over_their_own_run():
+    # production files use satin from about 1 mm and almost no stacked running stitch
+    objs = classify.run(_bar(1.2), RULES)["objects"]
+    assert objs[0]["kind"] == "run" and objs[0]["satin_w"]
+    pts = np.asarray(stitch.run({"objects": objs, "order": [0]}, RULES)["objects"][0]["segments"][0])
+    d = np.diff(pts, axis=0)
+    ang = np.arctan2(d[:, 1], d[:, 0])
+    turn = np.abs((np.diff(ang) + math.pi) % (2 * math.pi) - math.pi)
+    zig = turn > math.radians(140)                       # the satin on the way back
+    assert zig.sum() > 100
+    across = np.abs(d[1:][zig, 1])
+    assert 1.0 <= np.median(across) <= 1.7               # about the drawn width
+    # one thread: out as a run (the underlay), back as the satin, ending where it began
+    assert math.dist(pts[0], pts[-1]) < 2.0
+
+
+def test_thin_lines_stay_running_stitch_and_pile_fabric_gets_four_passes():
+    thin = classify.run(_bar(0.6), RULES)["objects"]
+    assert thin[0]["kind"] == "run" and not thin[0].get("satin_w")
+    towel = config.rules_for("towel")
+    objs = classify.run(_bar(1.2), towel)["objects"]
+    assert objs[0]["bold"] and not objs[0].get("satin_w")
+    sewn = stitch.run({"objects": objs, "order": [0]}, towel)["objects"]
+    pts = next(o for o in sewn if o["kind"] == "run")["segments"][0]
     travelled = sum(math.dist(a, b) for a, b in zip(pts, pts[1:]))
     assert travelled == pytest.approx(4 * 30, rel=0.1)          # out once, back as a bean
+
+
+def test_a_web_of_outlines_has_one_line_weight_and_crowded_lines_stay_thin():
+    from app.pipeline.classify import _web_weights
+    from shapely.geometry import LineString as LS
+    walls = [np.array([(0, 0), (40, 0)], float), np.array([(40, 0), (40, 30)], float),
+             np.array([(40, 30), (0, 30)], float), np.array([(0, 30), (0, 0)], float)]
+    inner = [np.array([(18, 0), (18, 8)], float), np.array([(19.3, 0), (19.3, 8)], float)]
+    route = walls + inner
+    piece = unary_union([LS(w).buffer(0.6, cap_style=2) for w in walls]
+                        + [LS(i).buffer(0.55, cap_style=2) for i in inner])
+    w = _web_weights(route, piece, 1.1, 0.8)
+    assert len({round(x, 3) for x in w[:4]}) == 1 and w[0] >= 1.1     # one weight for the walls
+    assert min(w[4:]) == 0.0                                          # two lines 1.3 mm apart: one thins
 
 
 def test_running_stitches_never_go_shorter_than_about_one_and_a_quarter_mm():

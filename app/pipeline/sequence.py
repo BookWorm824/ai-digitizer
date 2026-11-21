@@ -35,7 +35,9 @@ ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinar
 ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
 ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
 ROUTE_CELL_MM = 0.3        # grid used to find it
-ROUTE_OPEN_MM = 1.0        # at most this much of it may lie on open ground (Ink/Stitch: 1 mm)
+ROUTE_OPEN_MM = 2.0        # at most this much of it may lie on open ground: the connector
+                           # between two satin letters at their closest points (digitizing
+                           # software trims above 2 mm). Only lettering gets this much.
 KIND_ORDER = ("fill", "satin", "run")
 CAP_BAND_MM = 20.0
 
@@ -193,12 +195,17 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
     # across stitching that is already sewn shows on top (a line across a finished satin).
     # Thread may also hide under a later color only if that color is not lighter: dark
     # thread under a light fill shows through.
-    order_shapes, order_colors, order_of = [], [], {}
+    thin_shapes = {id(o["shape"]) for o in objects if o.get("thin") and o.get("shape") is not None}
+    letter_shapes = {id(o["shape"]) for o in objects
+                     if o.get("seq") is not None and o.get("shape") is not None}
+    order_shapes, order_colors, order_thin, order_letter, order_of = [], [], [], [], {}
     for n, (color_n, raw_segments) in enumerate(raw_blocks):
         for j, (_sg, shape) in enumerate(raw_segments):
             order_of[(n, j)] = len(order_shapes)
             order_shapes.append(shape.buffer(0.3) if shape is not None else None)
             order_colors.append(color_n)
+            order_thin.append(id(shape) in thin_shapes)
+            order_letter.append(id(shape) in letter_shapes)
     indexed = [(k, g) for k, g in enumerate(order_shapes) if g is not None]
     tree = STRtree([g for _, g in indexed]) if indexed else None
 
@@ -212,8 +219,11 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         if tree is None:
             return []
         near = [indexed[i] for i in tree.query(line)]
-        return [g for kk, g in near if kk >= k and (order_colors[kk] == color
-                                                    or lum(order_colors[kk]) <= lum(color) + 20)]
+        # same color: any later stitching hides it (even a line sewn along the same path);
+        # another color: only solid stitching that is not lighter
+        return [g for kk, g in near if kk >= k and (
+            order_colors[kk] == color
+            or (not order_thin[kk] and lum(order_colors[kk]) <= lum(color) + 20))]
 
     def hidden_by_later(line, k, color):
         later = covers(k, color, line)
@@ -255,7 +265,12 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
             return None
         path = np.asarray(path)
         open_cells = int(sum(1 for r, c in path if mask[r, c] == 0))
-        if open_cells * cell > ROUTE_OPEN_MM:
+        # Only satin lettering may be reached by a connector longer than an ordinary short
+        # hop: letters in a word are joined at their closest points, not trimmed. (Between
+        # thin running-stitch letters a connector is as heavy as the letters' own lines
+        # and reads as part of them.)
+        allowed = ROUTE_OPEN_MM if (order_letter[k] and not order_thin[k]) else ALWAYS_JOIN_MM
+        if open_cells * cell > allowed:
             return None
         pts = [(minx + c * cell, miny + r * cell) for r, c in path]
         line = LineString([p] + pts + [q]).simplify(cell)

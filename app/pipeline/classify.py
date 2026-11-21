@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 import shapely
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import substring, unary_union
 from skimage.morphology import skeletonize
 
 from . import aiplan, geometry, lettering, linenet
@@ -628,6 +628,136 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
     return out
 
 
+def _line_width(seg: np.ndarray, piece) -> float:
+    """How wide a line of a web was drawn: the typical length of the cut straight across it
+    through the drawn shape, measured away from its ends (junctions are fatter). Measuring
+    across, not from the centre line outward, gives the same answer when straightening has
+    moved the centre line a little to one side."""
+    ls = LineString(seg)
+    if ls.length < 0.6:
+        return 0.0
+    lo, hi = 0.2 * ls.length, 0.8 * ls.length
+    n = max(3, int((hi - lo) / 0.5) + 1)
+    out = []
+    for k in range(n):
+        s = lo + (hi - lo) * k / (n - 1)
+        p, q = ls.interpolate(max(0.0, s - 0.15)), ls.interpolate(min(ls.length, s + 0.15))
+        tx, ty = q.x - p.x, q.y - p.y
+        t = math.hypot(tx, ty)
+        if t < 1e-9:
+            continue
+        c = ls.interpolate(s)
+        nx, ny = -ty / t, tx / t
+        cut = LineString([(c.x - nx * 4.0, c.y - ny * 4.0), (c.x + nx * 4.0, c.y + ny * 4.0)])
+        parts = cut.intersection(piece)
+        parts = [g for g in getattr(parts, "geoms", [parts]) if g.geom_type == "LineString"]
+        if not parts:
+            continue
+        near = min(parts, key=lambda g: g.distance(c))
+        if near.distance(c) <= 1.0:
+            out.append(near.length)
+    # (the lower quarter: a cut that happens to run along a crossing line reads far too
+    # wide, and never too narrow)
+    return float(np.percentile(out, 25)) if out else 0.0
+
+
+def _web_weights(route: list, piece, least: float, bold: float,
+                 axis: float | None = None) -> list | None:
+    """Line weights for a web of outlines, or None if it is thin line work (running stitch).
+    A web has one weight, its typical drawn width, so every wall is the same thickness (a
+    line here and there measuring a little over or under must not come out bold beside
+    thin ones). Only lines drawn at least twice as heavy are sewn heavier (1.5 times the
+    web's), and lines drawn clearly finer stay running stitch (0). A web drawn bold (from
+    `bold` mm) but under the narrowest satin (`least`) is thickened to it, as a digitizer
+    thickens hairlines; finer webs are running stitch."""
+    widths = np.array([_line_width(seg, piece) for seg in route])
+    lengths = np.array([LineString(seg).length for seg in route])
+    twins = _twins(route, axis)
+    for k, t in twins.items():                      # the two sides measure alike
+        widths[k] = widths[t] = max(widths[k], widths[t])
+    ok = widths > 0
+    if not ok.any():
+        return None
+    order = np.argsort(widths[ok])
+    cum = np.cumsum(lengths[ok][order])
+    typical = float(widths[ok][order][int(np.searchsorted(cum, cum[-1] / 2.0))])
+    if typical < bold:
+        return None
+    weight = max(typical, least)          # bold lines under the narrowest satin are thickened
+    out = []
+    for w in widths:
+        if w < 0.5 * typical:
+            out.append(0.0)
+        elif w <= 2.0 * typical:
+            out.append(weight)
+        else:
+            out.append(float(max(weight, 1.5 * typical)))
+    out = _uncrowd(route, out)
+    for k, t in twins.items():                      # ... and are sewn alike
+        if out[k] != out[t]:
+            out[k] = out[t] = 0.0 if min(out[k], out[t]) == 0.0 else max(out[k], out[t])
+    # A drawing where much of the line work is too fine or too crowded for satin (bricks,
+    # panes, hatching) is fine line art: all of it is running stitch. Bold lines mixed
+    # through a tangle of thin ones only make the tangle heavier.
+    fine = float(lengths[np.asarray(out) == 0.0].sum()) / max(float(lengths.sum()), 1e-9)
+    if fine > FINE_WEB_SHARE:
+        return None
+    return out
+
+
+def _twins(route: list, axis: float | None) -> dict:
+    """For a symmetric drawing: each line's mirror twin (by position in the route)."""
+    if axis is None:
+        return {}
+    mids = np.array([(float(np.mean([seg[0][0], seg[-1][0]])), float(np.mean([seg[0][1], seg[-1][1]])))
+                     for seg in route])
+    lens = np.array([LineString(seg).length for seg in route])
+    out = {}
+    for k, (x, y) in enumerate(mids):
+        d = np.hypot(mids[:, 0] - (2.0 * axis - x), mids[:, 1] - y)
+        d[np.abs(lens - lens[k]) > 0.3 + 0.1 * lens[k]] = np.inf
+        t = int(d.argmin())
+        if d[t] <= 0.4 and abs(x - axis) > 0.2:
+            out[k] = t
+    return out
+
+
+CLEAR_MM = 0.5        # satin lines closer than this (edge to edge) sew as one blob
+FINE_WEB_SHARE = 0.3  # more of a web than this unfit for satin: sew it all as lines
+
+
+def _uncrowd(route: list, weights: list) -> list:
+    """Lines too close together to sew as separate satin lines (the rings of a doorway arch,
+    a small window's frame) are demoted to running stitch, shortest first, so the long main
+    lines stay bold and the crowded detail inside them stays readable instead of closing
+    up into a solid lump."""
+    keys, lines = {}, {}
+    for k, seg in enumerate(route):
+        a, b = tuple(np.round(seg[0], 3)), tuple(np.round(seg[-1], 3))
+        key = (a, b, len(seg)) if a <= b else (b, a, len(seg))
+        keys[k] = key
+        lines.setdefault(key, LineString(seg))
+    weight = {keys[k]: w for k, w in enumerate(weights)}
+    kept = []                                       # (line, weight) of lines staying satin
+    for key in sorted(lines, key=lambda q: -lines[q].length):
+        w, ln = weight[key], lines[key]
+        if w <= 0:
+            continue
+        if ln.length <= 2.0 * w:
+            kept.append((ln, w))
+            continue
+        # the middle of the line (its ends meet other lines at the junctions)
+        mid = substring(ln, min(w, 0.25 * ln.length), ln.length - min(w, 0.25 * ln.length))
+        near = [o.buffer(ow / 2.0 + w / 2.0 + CLEAR_MM) for o, ow in kept
+                if o.distance(mid) < ow / 2.0 + w / 2.0 + CLEAR_MM]
+        crowded = unary_union(near).intersection(mid).length if near else 0.0
+        if crowded > 0.5 * mid.length:
+            weight[key] = 0.0
+        else:
+            kept.append((ln, w))
+    return [weight[keys[k]] for k in range(len(route))]
+
+
 def _dot(poly: Polygon, satin_max: float) -> dict | None:
     """A small round dot as one satin column sewn straight across it: its two edges are the
     two halves of the circle, so it sews as a clean round dot. (A tatami fill of a 3 mm dot
@@ -870,7 +1000,9 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         if width < NOISE_WIDTH_MM:
             return False
         mm = [np.array([to_mm(y, x) for y, x in pth]) for pth in paths if len(pth) >= 2]
-        routes = linenet.network(mm, vec.get("axes", [0.0, 90.0]), spur=rules["min_detail_mm"])
+        net = {}
+        routes = linenet.network(mm, vec.get("axes", [0.0, 90.0]), spur=rules["min_detail_mm"],
+                                 info=net)
         routes = [r for r in routes if linenet.length(r) >= MIN_THIN_LENGTH_MM / 2]
         if not routes:
             return False
@@ -879,10 +1011,20 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         # out once and back as a bean, which reads as a bold line without a skinny satin.
         if bold is None:
             bold = width >= rules["line_bold_mm"] or rules.get("knockdown", False)
+        # Lines drawn about a millimetre wide or more are satin, as in production files
+        # (measured with tools/study.py: satin from about 1 mm, almost no bean): each line
+        # of the web is a narrow satin over its own running-stitch underlay, the whole web
+        # one thread. Thinner lines stay running stitch.
         for route in routes:
             line = LineString(np.vstack(route))
-            objects.append({"kind": "run", "color": color, "line": line, "route": route,
-                            "width_mm": width, "bean": False, "bold": bool(bold)})
+            o = {"kind": "run", "color": color, "line": line, "route": route,
+                 "width_mm": width, "bean": False, "bold": bool(bold)}
+            if use_satin and not rules.get("knockdown", False):
+                weights = _web_weights(route, piece, rules.get("satin_net_min_mm", 1.1),
+                                       rules["line_bold_mm"], net.get("axis"))
+                if weights:
+                    o["satin_w"] = weights
+            objects.append(o)
         return True
 
     def sew_narrow(part, color):

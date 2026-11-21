@@ -698,13 +698,13 @@ function drawTo(n) {
   const g = sim.g;          // fabric and shadows
   const t = sim.tg;         // thread
   const s = sim.s;
-  // Thread is about 0.4 mm but flattens and spreads when sewn, closing the gaps between
-  // rows, so it is drawn a touch wider: otherwise the underlay shows through as a grid.
+  // Thread is drawn at the width it really lies (about 0.3 mm for 40-weight), so coverage
+  // on screen is honest: a fill that is too open shows the fabric here as it would sewn.
   // Every stitch is drawn as its own piece of thread, the way it lies on the fabric: a soft
   // shadow under it, the thread itself shaded by which way it runs (thread catches the light
   // differently by direction, which is what makes satin shine and fills look woven), and a
   // thin highlight down its middle.
-  const lw = 0.42 * s;
+  const lw = 0.32 * s;      // 40-weight thread as it lies (wider would hide thin coverage)
   const c = sim.cursor;
   g.lineCap = 'round';
   while (sim.drawn < n && c.b < r.blocks.length) {

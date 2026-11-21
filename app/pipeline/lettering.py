@@ -479,6 +479,92 @@ def _serifs(strokes, kinds, wu):
     return out
 
 
+_PLAN_CACHE: dict = {}
+
+
+JOIN_MM = 1.0     # a connecting stitch this short may show (sequence.ALWAYS_JOIN_MM)
+
+
+def _plan(lines: tuple, dots: tuple, waits: tuple, wu: float, width: float,
+          join: float = 0.0) -> list:
+    """The order, direction and way to sew a letter's strokes so that the thread is not cut
+    inside the letter. Each stroke can be sewn from either end, and either straight through
+    (it ends at its far end) or out along its centre as a run and back as satin (it ends
+    where it began). A move to the next stroke costs nothing when it lies under strokes
+    still to be sewn (they hide the travelling thread) and counts as a trim when it would
+    lie on open fabric or on finished satin (unless it is a very short connecting stitch,
+    `join` font units at most). The cheapest plan is found by trying every
+    order that respects which strokes tuck under which (letters have few strokes).
+    Returns [(stroke, reversed, return)] with dots last."""
+    key = (lines, dots, waits, wu, round(width, 3), join)
+    if key in _PLAN_CACHE:
+        return _PLAN_CACHE[key]
+    idx = [i for i in range(len(lines)) if not dots[i]
+           and math.dist(lines[i][0], lines[i][-1]) > 1e-6]
+    rest = [i for i in range(len(lines)) if i not in idx]
+    n = len(idx)
+    if n == 0 or n > 10:
+        plan = [(i, False, False) for i in range(len(lines))]
+        _PLAN_CACHE[key] = plan
+        return plan
+    foot = [LineString(lines[i]).buffer(wu / 2.0 + 0.02, cap_style=2) for i in idx]
+    ends = [(lines[i][0], lines[i][-1]) for i in idx]
+    pos = {i: k for k, i in enumerate(idx)}
+    need = [sum(1 << pos[j] for j in waits[i] if j in pos) for i in idx]
+    covers: dict = {}
+
+    def hidden(P, Q, done_mask):
+        if math.dist(P, Q) < 1e-6:
+            return True
+        if done_mask not in covers:
+            later = [foot[k] for k in range(n) if not done_mask >> k & 1]
+            covers[done_mask] = unary_union(later) if later else None
+        cov = covers[done_mask]
+        return cov is not None and cov.contains(LineString([P, Q]))
+
+    # states: (strokes sewn, where the needle is) -> (cost, plan so far)
+    start, finish = (0.0, 0.0), (width, 0.0)
+    best = {(0, None): (0.0, [])}
+    frontier = [(0, None)]
+    full = (1 << n) - 1
+    for _step in range(n):
+        nxt: dict = {}
+        for state in frontier:
+            mask, at = state
+            cost, plan = best[state]
+            for k in range(n):
+                if mask >> k & 1 or (need[k] & mask) != need[k]:
+                    continue
+                for rev in (False, True):
+                    a, b_ = (ends[k][1], ends[k][0]) if rev else ends[k]
+                    if at is None:
+                        # begin at the letter's left side (low if there is a choice):
+                        # the thread arrives from the letter before
+                        move = 1.0 * abs(a[0] - start[0]) + 0.1 * abs(a[1] - start[1])
+                    elif hidden(at, a, mask):
+                        move = 0.05 * math.dist(at, a)
+                    elif math.dist(at, a) <= join:
+                        move = 0.5 + 0.2 * math.dist(at, a)     # a short connector that shows
+                    else:
+                        move = 4.0 + math.dist(at, a)           # a trim
+                    for ret in (False, True):
+                        end = a if ret else b_
+                        c = cost + move + (0.05 if ret else 0.0)
+                        if mask | 1 << k == full:
+                            # ... and end at its right side, beside the next letter
+                            c += 1.5 * abs(end[0] - finish[0]) + 0.1 * abs(end[1] - finish[1])
+                        st2 = (mask | 1 << k, (round(end[0], 4), round(end[1], 4)))
+                        if st2 not in nxt or c < nxt[st2][0]:
+                            nxt[st2] = (c, plan + [(idx[k], rev, ret)])
+        best, frontier = nxt, list(nxt)
+    plan = min(best.values(), key=lambda v: v[0])[1] if best else [(i, False, False) for i in idx]
+    plan = plan + [(i, False, False) for i in rest]
+    if len(_PLAN_CACHE) > 4000:
+        _PLAN_CACHE.clear()
+    _PLAN_CACHE[key] = plan
+    return plan
+
+
 def letter_strokes(pl: Placement, style: str = "block") -> list[dict]:
     """The strokes of one placed letter, in sewing order, each as
     {"pts": [(x, y) mm], "cut0", "cut1", "dot"} ready for column()."""
@@ -502,32 +588,20 @@ def letter_strokes(pl: Placement, style: str = "block") -> list[dict]:
             kinds.append([("free",), ("free",)])
             deps.append(set())
 
-    # order: a stroke that tucks under another is sewn before it; otherwise left to right,
-    # each stroke started from whichever end is nearer the needle
+    # order: a stroke that tucks under another is sewn before it; within that, the order,
+    # the direction and the way each stroke is sewn are planned so the thread never has to
+    # be cut inside the letter (see _plan)
     wait = [set() for _ in strokes]                  # strokes that must be sewn before this one
     for i, d in enumerate(deps):
         for j in d:
             wait[j].add(i)
-    left = list(range(len(strokes)))
-    order, pos = [], None
-    while left:
-        ready = [i for i in left if not (wait[i] & set(left))] or left
-        def key(i):
-            pts = strokes[i]["pts"]
-            if pos is None:
-                return (min(x for x, _ in pts), 0)
-            return (min(math.dist(pos, pts[0]), math.dist(pos, pts[-1])), 0)
-        i = min(ready, key=key)
-        left.remove(i)
-        pts = strokes[i]["pts"]
-        rev = pos is not None and math.dist(pos, pts[-1]) < math.dist(pos, pts[0]) - 1e-9
-        if pos is None:
-            rev = pts[-1][0] < pts[0][0] - 1e-9
-        order.append((i, rev))
-        pos = pts[0] if rev else pts[-1]
+    order = _plan(tuple(tuple(map(tuple, s["pts"])) for s in strokes),
+                  tuple(bool(s["dot"]) for s in strokes),
+                  tuple(frozenset(w) for w in wait), round(wu, 3), g["width"],
+                  round(JOIN_MM / max(pl.s, 1e-6), 2))
 
     out = []
-    for i, rev in order:
+    for i, rev, ret in order:
         s = strokes[i]
         pts, ks = list(s["pts"]), list(kinds[i])
         if rev:
@@ -567,7 +641,7 @@ def letter_strokes(pl: Placement, style: str = "block") -> list[dict]:
                 cuts.append(("ext", pl.w / 2))
             else:
                 cuts.append(None)
-        out.append({"pts": mm, "cut0": cuts[0], "cut1": cuts[1], "dot": False})
+        out.append({"pts": mm, "cut0": cuts[0], "cut1": cuts[1], "dot": False, "ret": ret})
     return out
 
 
@@ -668,6 +742,12 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                  "width_mm": float(pl.w), "area_mm2": float(col["outline"].area), "seq": seq}
             if text_style:
                 o.update(text_style)
+            # The plan says where each stroke ends: at its far end, or (sewn out along its
+            # centre as a run and back as satin) where it began, beside the stroke that
+            # comes next, which the thread reaches travelling under strokes sewn later.
+            # No trim. (Embroidery fonts are built this way: the exit of one stroke is the
+            # entry of the next.)
+            o["finish"] = "start" if st.get("ret") else "far"
             if row is not None:
                 o["text_row"] = row
             out.append(o)
@@ -757,6 +837,7 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
              if not st["dot"] and LineString(st["pts"]).length >= 0.3]
     out = []
     for k, route in enumerate(_letter_tours(lines)):
+        route = route + _exit_path(route)
         o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)), "route": route,
              "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
              # tiny letters need short stitches or their curves turn into corners (a 2 mm
@@ -778,6 +859,49 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
             o["text_row"] = row
         out.append(o)
     return out
+
+
+def _exit_path(route: list) -> list:
+    """Extra passes that carry the thread from where a letter's tour ends (where it began, at
+    its left foot) along the letter's own lines to its right-hand foot, so the next letter
+    starts a short connecting stitch away and the word needs no trims (how small running-
+    stitch fonts are built)."""
+    def node(p):
+        return (round(float(p[0]), 3), round(float(p[1]), 3))
+    edges = {}
+    for seg in route:
+        a, b = node(seg[0]), node(seg[-1])
+        if a != b and (b, a) not in edges:
+            edges.setdefault((a, b), np.asarray(seg, float))
+    if not edges:
+        return []
+    start = node(route[0][0])
+    nodes = {n for e in edges for n in e}
+    target = max(nodes, key=lambda n: (n[0] + 0.15 * n[1], n[1]))     # right-most, low
+    if target == start:
+        return []
+    adj = {}
+    for (a, b), seg in edges.items():
+        length = float(LineString(seg).length)
+        adj.setdefault(a, []).append((b, length, seg))
+        adj.setdefault(b, []).append((a, length, seg[::-1]))
+    best, prev, todo = {start: 0.0}, {}, [start]
+    while todo:                                        # letters are tiny graphs
+        u = min(todo, key=lambda n: best[n])
+        todo.remove(u)
+        for v, length, seg in adj.get(u, []):
+            if best[u] + length < best.get(v, float("inf")):
+                best[v], prev[v] = best[u] + length, (u, seg)
+                if v not in todo:
+                    todo.append(v)
+    if target not in prev:
+        return []
+    path, n = [], target
+    while n != start:
+        u, seg = prev[n]
+        path.append(seg)
+        n = u
+    return path[::-1]
 
 
 def text_style(H: float) -> dict:

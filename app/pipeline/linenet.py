@@ -123,7 +123,8 @@ def prune(nodes: np.ndarray, edges: list[dict], spur: float = SPUR_MM) -> list[d
     return [e for k, e in enumerate(edges) if k not in drop]
 
 
-def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float]) -> np.ndarray:
+def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
+               info: dict | None = None) -> np.ndarray:
     """Fit every edge (straight where it is straight), make near-level and near-upright
     straight edges exactly so by giving their two nodes the same y (or x), and line up
     levels and uprights that are within ALIGN_MM of each other across the whole drawing."""
@@ -140,6 +141,8 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float]) -> np.nd
     nodes, twin, mid = symmetrize(nodes)
     if twin is not None:
         _mirror_edges(edges, twin, mid)
+        if info is not None:
+            info["axis"] = mid                        # the drawing's line of symmetry
     for axis in (1, 0):                               # 1: level edges share y; 0: uprights share x
         uf = _UF(len(nodes))
         for e in edges:
@@ -339,7 +342,8 @@ def _edge_angle(e, u, nodes):
     return math.atan2(d[1], d[0])
 
 
-def network(paths_mm: list[np.ndarray], axes: list[float], spur: float = SPUR_MM):
+def network(paths_mm: list[np.ndarray], axes: list[float], spur: float = SPUR_MM,
+            info: dict | None = None):
     """Centre-line paths -> list of routes (each a list of oriented edge polylines)."""
     paths_mm = [np.asarray(p, float) for p in paths_mm if len(p) >= 2]
     if not paths_mm:
@@ -348,26 +352,33 @@ def network(paths_mm: list[np.ndarray], axes: list[float], spur: float = SPUR_MM
     edges = prune(nodes, edges, spur)
     if not edges:
         return []
-    nodes = straighten(nodes, edges, axes)
+    nodes = straighten(nodes, edges, axes, info)
     edges = [e for e in edges if LineString(e["pts"]).length >= 0.15 or e["a"] != e["b"]]
     return tours(nodes, edges)
 
 
 def route_points(route: list[np.ndarray], run_points, rules: dict,
-                 back_pass=None) -> list[tuple[float, float]]:
+                 back_pass=None, satin=None) -> list[tuple[float, float]]:
     """Needle points along a route. Each edge is stitched once and the return pass reuses
     the same needle holes, so the two passes lie exactly on top of each other. With
     `back_pass` (the bean function) the way back is sewn as a bean: four passes in all, a
-    bold line that still ends where it started."""
+    bold line that still ends where it started. With `satin` (called with the edge's place
+    in the route and its line as sewn; returns needle points, or None for an edge too thin
+    for it) the way back is a satin column over the run just laid: the run is its underlay
+    and its travel, so a whole web of bold outlines is one thread with no trims. This is how
+    embroidery software "branches" outlines (the continuous-underlay tour in Melco's
+    patent US9702070; our own code)."""
     cache = {}
     pts: list = []
-    for poly in route:
+    for k, poly in enumerate(route):
         key = np.round(np.asarray(poly, float), 4).tobytes()
         rkey = np.round(np.asarray(poly, float)[::-1], 4).tobytes()
         if rkey in cache:
-            seg = cache[rkey][::-1]
-            if back_pass is not None:
-                seg = back_pass(seg)
+            seg = satin(k, np.asarray(poly, float)) if satin is not None else None
+            if seg is None:
+                seg = cache[rkey][::-1]
+                if back_pass is not None:
+                    seg = back_pass(seg)
         else:
             seg = run_points(LineString(poly), rules)
             cache[key] = seg

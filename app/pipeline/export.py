@@ -83,6 +83,9 @@ def _thread_light(dx: float, dy: float) -> float:
     return 0.9 + 0.1 * math.cos(2 * math.atan2(dy, dx))   # same for both zig-zag slants
 
 
+THREAD_MM = 0.32
+
+
 def render_preview(plan: dict, px_per_mm: float = 10.0, fabric_rgb=(238, 236, 230)) -> np.ndarray:
     """A thread-look picture (BGR) of the plan. Every stitch is drawn as its own piece of
     thread, in sewing order: a soft shadow, the thread shaded by its direction (which is what
@@ -91,8 +94,10 @@ def render_preview(plan: dict, px_per_mm: float = 10.0, fabric_rgb=(238, 236, 23
     k = 2
     ppm = px_per_mm * k
     img, to_px = canvas_for(plan["bounds"], ppm, pad_mm=4.0, color=fabric_rgb[::-1])
-    lw = max(1, int(round(0.42 * ppm)))
-    core = max(1, int(round(0.37 * ppm)))
+    # 40-weight thread lies about 0.3 mm wide. Drawn any wider, a thin fill or a single run
+    # looks more solid on screen than it will sew.
+    lw = max(1, int(round(THREAD_MM * ppm)))
+    core = max(1, int(round(0.85 * THREAD_MM * ppm)))
     sheen = max(1, int(round(0.1 * ppm)))
     off = max(1, int(round(0.12 * ppm)))
     # Two passes. First every stitch's shadow, onto the fabric; then the thread. A shadow
