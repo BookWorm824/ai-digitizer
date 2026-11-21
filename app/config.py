@@ -73,7 +73,9 @@ RULES: dict = {
     "knockdown_spacing_mm": 1.5,
     "work_px_per_mm": 10.0,       # working resolution of the cleanup pass
     "work_max_px": 2400,
-    "min_gap_mm": 0.5,            # unsewn gaps narrower than this close up when sewn: fill them
+    "min_gap_mm": 0.25,           # unsewn gaps narrower than this are filled in. (0.5 merged the
+                                  # walls of a line drawing into blobs at left-chest size; lines
+                                  # are now sewn at a set width, which keeps gaps open)
     "min_enclosed_mm2": 25.0,     # blank areas inside the design smaller than this (letter
                                   # counters) stay open fabric rather than being sewn
 }

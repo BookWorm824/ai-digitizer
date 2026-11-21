@@ -137,14 +137,44 @@ def _outline_satin(route: list, widths: list, rules: dict):
                     degree.get(tuple(np.round(poly[-1], 3)), 1)) <= 1
         if loose and LineString(poly).length < 2.5 * w:
             return None                 # a stub: as satin it would be a blob, not a line
-        col = lettering.column(poly, w, ("ext", past(poly[0], w)), ("ext", past(poly[-1], w)))
-        if not col:
-            return None
-        # (half the usual pull compensation: full compensation on every line of a web makes
-        # the whole drawing heavier than it was drawn)
-        segs = stitch_satin(dict(col, underlay="none", comp_scale=0.5), rules)
-        return segs[0] if segs and len(segs[0]) > 3 else None
+        # A line that turns a corner is one column per leg, each carried half a width past
+        # the corner so the legs lap: a square corner, as drawn. One column bent round the
+        # corner fans out into a rounded hump (Wilcom: lapped corners for 45-110 degrees).
+        legs = _legs(np.asarray(poly, float))
+        pts: list = []
+        for j, leg in enumerate(legs):
+            c0 = ("ext", w / 2.0) if j > 0 else ("ext", past(poly[0], w))
+            c1 = ("ext", w / 2.0) if j < len(legs) - 1 else ("ext", past(poly[-1], w))
+            col = lettering.column(leg, w, c0, c1)
+            if not col:
+                continue
+            # (half the usual pull compensation: full compensation on every line of a web
+            # makes the whole drawing heavier than it was drawn)
+            segs = stitch_satin(dict(col, underlay="none", comp_scale=0.5), rules)
+            if segs and len(segs[0]) > 3:
+                pts += segs[0]
+        return pts if len(pts) > 3 else None
     return satin
+
+
+CORNER_TURN_DEG = 50.0     # a turn this sharp in a line is a corner, not a bend
+
+
+def _legs(poly: np.ndarray) -> list:
+    """Split a polyline at its corners (turns sharper than CORNER_TURN_DEG)."""
+    if len(poly) < 3:
+        return [poly]
+    cut = [0]
+    for i in range(1, len(poly) - 1):
+        a, b = poly[i] - poly[i - 1], poly[i + 1] - poly[i]
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na < 1e-9 or nb < 1e-9:
+            continue
+        turn = math.degrees(math.acos(max(-1.0, min(1.0, float(a @ b) / (na * nb)))))
+        if turn > CORNER_TURN_DEG:
+            cut.append(i)
+    cut.append(len(poly) - 1)
+    return [poly[a:b + 1] for a, b in zip(cut, cut[1:]) if b > a]
 
 
 def bean(points: list) -> list:
@@ -924,7 +954,13 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
                                bean if obj.get("bold") else None,
                                _outline_satin(obj["route"], widths, rules) if widths else None)
             segments = [pts] if len(pts) > 1 else []
-            shape = obj["line"].buffer(max(0.4, max(widths) / 2.0) if widths else 0.4)
+            if widths:
+                # the ground each line really covers: its own satin, or a thread's width for
+                # a line left as running stitch (travel may only hide under real coverage)
+                shape = unary_union([LineString(seg).buffer(max(0.2, w / 2.0))
+                                     for seg, w in zip(obj["route"], widths) if len(seg) >= 2])
+            else:
+                shape = obj["line"].buffer(0.4)
         elif obj["kind"] == "run":
             step = obj.get("stitch_mm") or (rules["bean_stitch_mm"] if obj["bean"] else None)
             pts = run_points(obj["line"], dict(rules, run_stitch_mm=step) if step else rules)

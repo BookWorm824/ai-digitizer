@@ -29,6 +29,7 @@ SPUR_MM = 1.0            # loose stubs shorter than this are dropped (smallest d
 ALIGN_MM = 0.25          # levels/uprights closer than this are made exactly equal
 LINE_TOL_MM = 0.3        # a centre-line edge this close to straight is drawn straight
 AXIS_DEG = 8.0           # a straight edge this close to level/upright is made exactly so
+AXIS_LONG_DEG = 11.0     # ... or this close, for an edge at least 3 mm long
 MIRROR_TOL_MM = 0.7      # a junction this close to another's mirror image is its twin
 MIRROR_SHARE = 0.7       # a drawing is symmetric when this share of its junctions have twins
 MIRROR_MIN_NODES = 12
@@ -134,7 +135,10 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
         # calling an edge a curve (still under one thread width)
         pieces = geometry.fit(e["pts"], False, tol=LINE_TOL_MM)
         e["straight"] = len(pieces) == 1 and pieces[0]["kind"] == "line"
-        if not e["straight"] and pieces:
+        arc = None if e["straight"] else _arc(e["pts"])
+        if arc is not None:
+            e["pts"] = arc                            # an arch: one smooth curve
+        elif not e["straight"] and pieces:
             # (centre lines lean more than outlines do: junctions drag their ends about)
             e["pts"] = geometry._join(geometry._snap(pieces, axes, False, snap_deg=6.0,
                                                      snap_max_deg=AXIS_DEG))
@@ -152,7 +156,10 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
                 continue
             d = nodes[e["b"]] - nodes[e["a"]]
             ang = math.degrees(math.atan2(abs(d[1]), abs(d[0])))      # 0 = level, 90 = upright
-            if (axis == 1 and ang <= AXIS_DEG) or (axis == 0 and ang >= 90 - AXIS_DEG):
+            # (a long wall may lean a little more: tracing drags its ends at junctions,
+            # and a drawing's walls are level or upright)
+            lean = AXIS_LONG_DEG if float(np.hypot(*d)) >= 3.0 else AXIS_DEG
+            if (axis == 1 and ang <= lean) or (axis == 0 and ang >= 90 - lean):
                 uf.union(e["a"], e["b"])
         groups = {}
         for i in range(len(nodes)):
@@ -237,6 +244,39 @@ def _round_rings(nodes: np.ndarray, edges: list[dict], circles: list) -> np.ndar
             for node, end in ((e["a"], e["pts"][0]), (e["b"], e["pts"][-1])):
                 nodes[node] = end
     return nodes
+
+
+def _arc(pts) -> np.ndarray | None:
+    """If a centre line is one smooth bend (an arch, part of a ring: it turns the same way
+    all along, more than 30 degrees in all, with no corner), the line as a smooth curve.
+    Otherwise None. Cut into straight pieces an arch looks like a polygon."""
+    p = np.asarray(pts, float)
+    if len(p) < 4:
+        return None
+    raw = geometry._resample(p, False)
+    if len(raw) < 8:
+        return None
+    fine = geometry._smooth(raw, False, max(1, int(round(geometry.SMOOTH_MM / geometry.STEP_MM))))
+    if geometry._corners(fine, False):
+        return None                                   # a corner anywhere: not an arch
+    sm = geometry._smooth(raw, False, max(2, int(round(0.5 / geometry.STEP_MM))))
+    step = max(1, int(round(0.6 / geometry.STEP_MM)))
+    q = sm[::step]
+    if len(q) < 4:
+        return None
+    v = np.diff(q, axis=0)
+    ang = np.arctan2(v[:, 1], v[:, 0])
+    turn = (np.diff(ang) + np.pi) % (2 * np.pi) - np.pi
+    total = float(turn.sum())
+    if abs(total) < np.radians(30):
+        return None
+    same = float((np.sign(turn) == np.sign(total)).mean())
+    if same < 0.75:
+        return None
+    keep = geometry._dp(sm, 0.03)
+    out = sm[keep]
+    out[0], out[-1] = p[0], p[-1]                    # ends stay on their junctions
+    return out
 
 
 def symmetrize(nodes: np.ndarray) -> np.ndarray:

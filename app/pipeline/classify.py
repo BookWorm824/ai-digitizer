@@ -748,14 +748,40 @@ def _uncrowd(route: list, weights: list) -> list:
             continue
         # the middle of the line (its ends meet other lines at the junctions)
         mid = substring(ln, min(w, 0.25 * ln.length), ln.length - min(w, 0.25 * ln.length))
-        near = [o.buffer(ow / 2.0 + w / 2.0 + CLEAR_MM) for o, ow in kept
-                if o.distance(mid) < ow / 2.0 + w / 2.0 + CLEAR_MM]
-        crowded = unary_union(near).intersection(mid).length if near else 0.0
-        if crowded > 0.5 * mid.length:
+        near = [(o, ow) for o, ow in kept if o.distance(mid) < ow / 2.0 + w / 2.0 + CLEAR_MM]
+        if near and _alongside(mid, near, w) > 0.5:
             weight[key] = 0.0
         else:
             kept.append((ln, w))
     return [weight[keys[k]] for k in range(len(route))]
+
+
+def _tangent(line: LineString, at: float) -> float:
+    a = line.interpolate(max(0.0, at - 0.25))
+    b = line.interpolate(min(line.length, at + 0.25))
+    return math.atan2(b.y - a.y, b.x - a.x)
+
+
+def _alongside(mid: LineString, near: list, w: float) -> float:
+    """How much of a line runs alongside other lines, too close for both to be satin:
+    the share of points along it with another line within reach AND running the same way
+    (within 30 degrees). Two lines that meet at an angle (a roof's slope and its gable)
+    are close only near where they meet; that is a junction, not crowding."""
+    n = max(3, int(mid.length / 0.3) + 1)
+    hits = 0
+    for k in range(n):
+        s = mid.length * k / (n - 1)
+        pt = mid.interpolate(s)
+        t = _tangent(mid, s)
+        for o, ow in near:
+            if o.distance(pt) >= ow / 2.0 + w / 2.0 + CLEAR_MM:
+                continue
+            u = _tangent(o, o.project(pt))
+            diff = abs((t - u + math.pi / 2) % math.pi - math.pi / 2)
+            if diff < math.radians(30):
+                hits += 1
+                break
+    return hits / n
 
 
 def _round_openings(piece: Polygon) -> list:
