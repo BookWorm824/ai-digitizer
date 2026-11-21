@@ -551,8 +551,13 @@ def _plan(lines: tuple, dots: tuple, waits: tuple, wu: float, width: float,
                         end = a if ret else b_
                         c = cost + move + (0.05 if ret else 0.0)
                         if mask | 1 << k == full:
-                            # ... and end at its right side, beside the next letter
+                            # ... and end at its right side, beside the next letter, with
+                            # none of the letter's other strokes in the way (a connector
+                            # from inside a G would cross its finished bowl)
                             c += 1.5 * abs(end[0] - finish[0]) + 0.1 * abs(end[1] - finish[1])
+                            way = LineString([end, (width + 0.3, end[1])])
+                            if any(way.intersects(foot[j]) for j in range(n) if j != k):
+                                c += 3.0
                         st2 = (mask | 1 << k, (round(end[0], 4), round(end[1], 4)))
                         if st2 not in nxt or c < nxt[st2][0]:
                             nxt[st2] = (c, plan + [(idx[k], rev, ret)])
@@ -788,7 +793,9 @@ def _as_line(pl: Placement) -> Placement:
     q = Placement(pl.ch, 0.0, pl.by, pl.H, LINE_W_MM, pl.k, True)
     gw = GLYPHS[pl.ch]["width"]
     if gw > 0.05:
-        inner = gw * pl.s * pl.k + pl.w - LINE_W_MM
+        # Half the room the satin stroke took is given back to the gap between letters:
+        # thin line letters set as close as bold ones run into each other (a 9 into a 4).
+        inner = gw * pl.s * pl.k + 0.5 * (pl.w - LINE_W_MM)
         q.k = float(np.clip(inner / (gw * q.s), 0.6, 1.5))
     cx = pl.bx + pl.outer_width() / 2
     q.bx = cx - q.outer_width() / 2
@@ -837,7 +844,6 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
              if not st["dot"] and LineString(st["pts"]).length >= 0.3]
     out = []
     for k, route in enumerate(_letter_tours(lines)):
-        route = route + _exit_path(route)
         o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)), "route": route,
              "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
              # tiny letters need short stitches or their curves turn into corners (a 2 mm
@@ -859,49 +865,6 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
             o["text_row"] = row
         out.append(o)
     return out
-
-
-def _exit_path(route: list) -> list:
-    """Extra passes that carry the thread from where a letter's tour ends (where it began, at
-    its left foot) along the letter's own lines to its right-hand foot, so the next letter
-    starts a short connecting stitch away and the word needs no trims (how small running-
-    stitch fonts are built)."""
-    def node(p):
-        return (round(float(p[0]), 3), round(float(p[1]), 3))
-    edges = {}
-    for seg in route:
-        a, b = node(seg[0]), node(seg[-1])
-        if a != b and (b, a) not in edges:
-            edges.setdefault((a, b), np.asarray(seg, float))
-    if not edges:
-        return []
-    start = node(route[0][0])
-    nodes = {n for e in edges for n in e}
-    target = max(nodes, key=lambda n: (n[0] + 0.15 * n[1], n[1]))     # right-most, low
-    if target == start:
-        return []
-    adj = {}
-    for (a, b), seg in edges.items():
-        length = float(LineString(seg).length)
-        adj.setdefault(a, []).append((b, length, seg))
-        adj.setdefault(b, []).append((a, length, seg[::-1]))
-    best, prev, todo = {start: 0.0}, {}, [start]
-    while todo:                                        # letters are tiny graphs
-        u = min(todo, key=lambda n: best[n])
-        todo.remove(u)
-        for v, length, seg in adj.get(u, []):
-            if best[u] + length < best.get(v, float("inf")):
-                best[v], prev[v] = best[u] + length, (u, seg)
-                if v not in todo:
-                    todo.append(v)
-    if target not in prev:
-        return []
-    path, n = [], target
-    while n != start:
-        u, seg = prev[n]
-        path.append(seg)
-        n = u
-    return path[::-1]
 
 
 def text_style(H: float) -> dict:

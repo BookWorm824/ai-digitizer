@@ -30,7 +30,8 @@ RULES: dict = {
     "satin": True,                # narrow columns are sewn as satin
     "bean_line_mm": 0.3,          # visible detail lines get a bean (triple) run (Goodall)
     "bean_stitch_mm": 2.0,        # bean stitch length (sources: about 2 mm)
-    "text_run_mm": 4.0,           # lettering shorter than this is sewn as run/bean letters
+    "text_run_mm": 4.0,           # lettering shorter than this is sewn as running-stitch letters
+                                  # (satin letters under 4 mm close up: tried at 3.7 mm)
     "satin_net_min_mm": 1.1,      # lines of a web drawn this wide or more are narrow satin
     "text_narrow_satin_mm": 4.0,  # from here to 6 mm letters are a narrow (0.8-1.2 mm) satin
     "min_text_mm": 6.0,           # smallest cap height that reads cleanly in satin (Hatch, Melco)

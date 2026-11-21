@@ -737,7 +737,10 @@ function drawTo(n) {
       t.strokeStyle = rgbStr(rgb, 0.84 * lit); t.lineWidth = lw; t.stroke();          // thread edge
       t.strokeStyle = rgbStr(rgb, lit); t.lineWidth = lw * 0.86; t.stroke();          // thread
       t.globalAlpha = 0.4;
-      t.strokeStyle = rgbStr(rgb, 1.25 * lit, 0.25); t.lineWidth = lw * 0.22; t.stroke(); // sheen
+      // (the sheen follows the thread's own brightness: a bright streak on black thread
+      // makes a solid black fill look hatched)
+      t.strokeStyle = rgbStr(rgb, 1.25 * lit, 0.06 + 0.2 * (rgb[0] + rgb[1] + rgb[2]) / 765);
+      t.lineWidth = lw * 0.22; t.stroke();                                           // sheen
       t.globalAlpha = 1;
     }
     sim.drawn += end - c.p;

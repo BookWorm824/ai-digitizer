@@ -35,7 +35,7 @@ ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinar
 ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
 ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
 ROUTE_CELL_MM = 0.3        # grid used to find it
-ROUTE_OPEN_MM = 2.0        # at most this much of it may lie on open ground: the connector
+ROUTE_OPEN_MM = 1.5        # at most this much of it may lie on open ground: the connector
                            # between two satin letters at their closest points (digitizing
                            # software trims above 2 mm). Only lettering gets this much.
 KIND_ORDER = ("fill", "satin", "run")
@@ -171,7 +171,10 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                     letter = o["seq"][:2]
                     # a short hop to the next letter may be sewn through, except next to
                     # punctuation (a period joined to its letter reads as a comma)
-                    fresh = letter != last and (o.get("punct") or last_punct)
+                    # ... and thin running-stitch letters are never joined to each other: a
+                    # connecting stitch is as heavy as their own lines and changes how
+                    # they read (E_S_T). Satin letters are joined at their closest points.
+                    fresh = letter != last and (o.get("punct") or last_punct or o.get("thin"))
                     segs.append((_NewLetter(first) if fresh else first, o.get("shape")))
                     segs.extend((sg, o.get("shape")) for sg in rest)
                     if letter != last:

@@ -138,6 +138,8 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
             # (centre lines lean more than outlines do: junctions drag their ends about)
             e["pts"] = geometry._join(geometry._snap(pieces, axes, False, snap_deg=6.0,
                                                      snap_max_deg=AXIS_DEG))
+    if info and info.get("circles"):
+        nodes = _round_rings(nodes, edges, info["circles"])
     nodes, twin, mid = symmetrize(nodes)
     if twin is not None:
         _mirror_edges(edges, twin, mid)
@@ -180,6 +182,60 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
             p = e["pts"]
             t = np.linspace(0.0, 1.0, len(p))[:, None]
             e["pts"] = p + (1 - t) * (a - p[0]) + t * (b - p[-1])
+    return nodes
+
+
+RING_BAND_MM = 1.5        # a line this close outside a round opening is the ring around it
+
+
+def _round_rings(nodes: np.ndarray, edges: list[dict], circles: list) -> np.ndarray:
+    """Lines that run around a round opening (a clock face, the ring of a badge) are put on
+    a true circle. Traced, such a ring comes out as a few arcs of slightly different
+    curvature, flattened wherever another line touches it, and a lopsided circle is the
+    first thing the eye catches. `circles` are (x, y, radius) of the round openings."""
+    nodes = nodes.copy()
+    for cx, cy, r in circles:
+        c = np.array([cx, cy])
+        ring, dists = [], []
+        for e in edges:
+            p = np.asarray(e["pts"], float)
+            if len(p) < 2 or e["a"] == e["b"] and len(p) < 4:
+                continue
+            # points along the edge, evenly spaced
+            seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
+            total = float(seg.sum())
+            if total < 0.3:
+                continue
+            t = np.linspace(0.0, total, max(4, int(total / 0.3) + 1))
+            cum = np.concatenate([[0.0], np.cumsum(seg)])
+            q = np.column_stack([np.interp(t, cum, p[:, 0]), np.interp(t, cum, p[:, 1])])
+            d = np.linalg.norm(q - c, axis=1)
+            near = (d > r - 0.3) & (d < r + RING_BAND_MM)
+            if near.mean() < 0.8:
+                continue
+            # it must run around the opening, not point at it
+            rad = (q - c) / np.maximum(d[:, None], 1e-9)
+            tan = np.diff(q, axis=0)
+            tan /= np.maximum(np.linalg.norm(tan, axis=1, keepdims=True), 1e-9)
+            if np.abs((tan * rad[:-1]).sum(axis=1)).mean() > 0.5:
+                continue
+            ring.append((e, q))
+            dists.append(d[near])
+        if not ring:
+            continue
+        # enough of the way round to be a ring (not one wall brushing past the opening)
+        angles = np.concatenate([np.arctan2(q[:, 1] - cy, q[:, 0] - cx) for _e, q in ring])
+        covered = len(set(np.floor((angles + np.pi) / (np.pi / 12)).astype(int)))
+        if covered < 16:                                   # under two thirds of the circle
+            continue
+        R = float(np.median(np.concatenate(dists)))
+        for e, q in ring:
+            d = np.linalg.norm(q - c, axis=1)
+            e["pts"] = c + (q - c) / np.maximum(d[:, None], 1e-9) * R
+            e["straight"] = False
+            e["ring"] = True
+            for node, end in ((e["a"], e["pts"][0]), (e["b"], e["pts"][-1])):
+                nodes[node] = end
     return nodes
 
 
@@ -267,6 +323,8 @@ def _mirror_edges(edges: list[dict], twin: np.ndarray, c: float) -> None:
         if m < k:
             continue
         o = edges[m]
+        if e.get("ring") or o.get("ring"):
+            continue
         if e["straight"] or o["straight"]:
             e["straight"] = o["straight"] = True
             continue

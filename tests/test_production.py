@@ -54,9 +54,16 @@ def test_a_satin_letter_is_one_thread(ch):
 
 
 def test_a_satin_word_needs_few_trims():
-    pls = L.layout("TENNESSEE", 12.5, 0, 0, "varsity")
-    plan = _sew(L.objects(pls, 0, RULES, "varsity", L.text_style(12.5), group=0, row=0))
+    # letters 1.3 mm apart: joined at their closest points (connectors up to 1.5 mm)
+    pls = L.layout("TENNESSEE", 10.0, 0, 0, "varsity")
+    plan = _sew(L.objects(pls, 0, RULES, "varsity", L.text_style(10.0), group=0, row=0))
     assert plan["trims"] <= 3                      # it was one per stroke: more than twenty
+
+
+def test_thin_run_letters_are_never_joined_to_each_other():
+    pls = L.layout("EST", 3.5, 0, 0, "block")
+    plan = _sew(L.objects(pls, 0, RULES, "block", L.text_style(3.5), group=0, row=0))
+    assert plan["trims"] == 2                      # one thread per letter, none between
 
 
 def test_a_satin_stroke_ends_where_the_plan_says():

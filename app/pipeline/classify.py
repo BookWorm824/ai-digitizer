@@ -58,7 +58,7 @@ GLYPH_MAX_OVERLAP = 1.35 # ...nor one whose columns pile up on each other this m
 ROW_SATIN_SHARE = 1.0    # a word is satin only if every letter is clean satin: one fill
                          # letter among satin ones is the first thing the eye catches
 HEAVY_LETTER_RATIO = 0.31   # strokes heavier than this x the letter height: fill, not satin
-FILL_TEXT_MM = 3.5       # traced letters with strokes at least this wide fill cleanly, so
+FILL_TEXT_MM = 2.3       # traced letters with strokes at least this wide fill cleanly, so
                          # they keep the picture's own lettering; thinner ones are retyped
 SERIF_SMALL_MM = 8.0     # under this cap height, hairline serifs are dropped (rule 5)
 NETWORK_HOLES = 3        # a narrow shape with this many openings is a web of outlines
@@ -758,6 +758,42 @@ def _uncrowd(route: list, weights: list) -> list:
     return [weight[keys[k]] for k in range(len(route))]
 
 
+def _round_openings(piece: Polygon) -> list:
+    """Round openings in a shape (a clock face inside its ring): (x, y, radius) of each."""
+    out = []
+    for ring in piece.interiors:
+        hole = Polygon(ring)
+        if hole.area <= 0:
+            continue
+        r = math.sqrt(hole.area / math.pi)
+        if not 0.8 <= r <= 15.0:
+            continue
+        if 4.0 * math.pi * hole.area / max(hole.length ** 2, 1e-9) < 0.86:
+            continue
+        c = hole.centroid
+        far = max(Point(x, y).distance(c) for x, y in ring.coords)
+        near = min(Point(x, y).distance(c) for x, y in ring.coords)
+        if far <= 1.2 * r and near >= 0.8 * r:
+            out.append((c.x, c.y, r))
+    return out
+
+
+BLOCK_MIN_MM = 0.9     # the narrowest block that can be filled (two or three rows of thread)
+
+
+def _compact(poly: Polygon) -> bool:
+    """Is this a block (a window, a square, a short bar) and not a line? No holes, and less
+    than about three times as long as it is wide."""
+    if poly.interiors:
+        return False
+    rect = poly.minimum_rotated_rectangle
+    if rect.area <= 0 or poly.area < 0.6 * rect.area:
+        return False
+    c = list(rect.exterior.coords)
+    a, b = math.dist(c[0], c[1]), math.dist(c[1], c[2])
+    return max(a, b) < 3.0 * max(min(a, b), 1e-9)
+
+
 def _dot(poly: Polygon, satin_max: float) -> dict | None:
     """A small round dot as one satin column sewn straight across it: its two edges are the
     two halves of the circle, so it sews as a clean round dot. (A tatami fill of a 3 mm dot
@@ -1000,7 +1036,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         if width < NOISE_WIDTH_MM:
             return False
         mm = [np.array([to_mm(y, x) for y, x in pth]) for pth in paths if len(pth) >= 2]
-        net = {}
+        net = {"circles": _round_openings(piece)}
         routes = linenet.network(mm, vec.get("axes", [0.0, 90.0]), spur=rules["min_detail_mm"],
                                  info=net)
         routes = [r for r in routes if linenet.length(r) >= MIN_THIN_LENGTH_MM / 2]
@@ -1037,6 +1073,11 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             add_satin([dot], color, {"comp_scale": 0.5, "underlay": "none"})
             return
         w = typical_width(part)
+        if w < satin_min and w >= BLOCK_MIN_MM and part.area >= min_area and _compact(part):
+            # A small solid block (a window a millimetre or so wide) is still a block: sewn
+            # as one line it loses its mass and the building loses its windows.
+            add_fill(part, color)
+            return
         if w < satin_min or (len(part.interiors) >= NETWORK_HOLES and w < NETWORK_MAX_MM):
             if add_network(part, color) or add_lines(part, color):
                 return
@@ -1211,11 +1252,19 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
     for color, mass, ink in textures:
         add_texture(mass, color, ink=ink)
     for info in row_info:
-        if text and info["color"] == inside and info["row"] not in fits and not lettering.fit_row(
-                info["glyphs"], text, "block", rules["satin_max_mm"]):
-            # Blank areas shut inside the design (the walls between a building's windows)
-            # can line up like letters. When the words are known and these spell none of
-            # them, they are not lettering: sew them as ordinary shapes.
+        if info["row"] in fits or info["row"] in absorbed:
+            continue
+        # Shapes that line up like letters are not always letters: the walls between a
+        # building's windows, a row of windows. A row of plain blocks is not lettering. And
+        # when the words are known, a row of blank areas that spells none of them, or a
+        # row of blocks that spells none of them, is not lettering either. Such rows are
+        # sewn as ordinary shapes (a window stays a solid block, not a letter-thin line).
+        blocks = len(info["glyphs"]) >= 2 and all(_compact(g) and g.area >= 0.85
+                                                  * g.minimum_rotated_rectangle.area
+                                                  for g in info["glyphs"])
+        unspelled = bool(text) and (info["color"] == inside or blocks) and not lettering.fit_row(
+            info["glyphs"], text, "block", rules["satin_max_mm"])
+        if unspelled or (blocks and not text):
             info["text"] = None
             info["not_text"] = True
     if inside is not None and inside in shapes:

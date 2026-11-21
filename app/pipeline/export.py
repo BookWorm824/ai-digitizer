@@ -117,13 +117,16 @@ def render_preview(plan: dict, px_per_mm: float = 10.0, fabric_rgb=(238, 236, 23
                          lw, cv2.LINE_AA)
             drawn.append((rgb, pairs))
     for rgb, pairs in drawn:
+        # the sheen is a share of the thread's own brightness: black thread has little, and a
+        # bright streak down every black stitch made solid black fills look hatched
+        sheen_part = 0.08 + 0.22 * float(rgb.mean()) / 255.0
         for pa, pb in pairs:
             lit = _thread_light(pb[0] - pa[0], pb[1] - pa[1])
             cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * 0.84 * lit)[::-1]),
                      lw, cv2.LINE_AA)
             cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in (rgb * lit)[::-1]),
                      core, cv2.LINE_AA)
-            hi = rgb * lit * 1.1 + (255 - rgb * lit * 1.1) * 0.3
+            hi = rgb * lit * 1.1 + (255 - rgb * lit * 1.1) * sheen_part
             cv2.line(img, pa, pb, tuple(int(min(255, v)) for v in hi[::-1]), sheen,
                      cv2.LINE_AA)
     h, w = img.shape[:2]
