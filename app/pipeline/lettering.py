@@ -848,7 +848,8 @@ def _run_letter(pl: Placement, style: str, color: int, group, li: int, row) -> l
              "width_mm": 0.6, "bean": False, "bold": pl.H >= 4.5,
              # tiny letters need short stitches or their curves turn into corners (a 2 mm
              # "9" sewn in 1.25 mm stitches looks like ">")
-             "stitch_mm": float(np.clip(0.4 * pl.H, 0.8, 1.25)) if pl.H < 4.0 else 1.6,
+             # (a 3 mm "O" in 1.2 mm stitches is a hexagon)
+             "stitch_mm": float(np.clip(0.3 * pl.H, 0.7, 1.25)) if pl.H < 4.0 else 1.6,
              "seq": (group, li, k),
              "punct": not pl.ch.isalnum()}
         if row is not None:
@@ -1028,12 +1029,19 @@ def fit_line(text: str, box: tuple, H: float, w: float, style: str = "block",
         return pls
     lo = pls[0].bx + extent(pls[0], style)[0]
     hi = pls[-1].bx + extent(pls[-1], style)[1]
-    f = float(np.clip((maxx - minx) / max(hi - lo, 1e-6), 0.8, 1.25))
+    want = (maxx - minx) / max(hi - lo, 1e-6)
+    f = float(np.clip(want, 0.8, 1.25))
     for pl in pls:
         c = pl.bx + pl.outer_width() / 2
         pl.k *= f
         pl.run = run
         pl.bx = cx + (c - cx) * f - pl.outer_width() / 2
+    if want > 1.25 and len(pls) > 1:
+        # widely spaced lettering (M I C R O B I O L O G Y): the rest of the width goes
+        # between the letters, as drawn, rather than stretching the letters out of shape
+        gap = ((maxx - minx) - (hi - lo) * f) / (len(pls) - 1)
+        for i, pl in enumerate(pls):
+            pl.bx += (i - (len(pls) - 1) / 2.0) * gap
     return pls
 
 
@@ -1043,6 +1051,12 @@ def score(pls: list[Placement], glyphs: list, style: str = "block") -> float:
     touching letters trace as one shape, so a small difference is allowed)."""
     ours = unary_union([outline_of(pl, style) for pl in pls])
     theirs = unary_union(glyphs)
+    # traced letters drawn much thinner than the font's strokes are compared at the font's
+    # weight: otherwise even the right word covers little of them
+    t = float(np.median([stroke_width(g) for g in glyphs]))
+    w = float(np.median([pl.w for pl in pls]))
+    if w > 1.3 * t:
+        theirs = theirs.buffer((w - t) / 2.0, quad_segs=4)
     union = ours.union(theirs).area
     if not union:
         return 0.0
@@ -1051,11 +1065,35 @@ def score(pls: list[Placement], glyphs: list, style: str = "block") -> float:
     return iou * (1.0 - 0.6 * abs(n - m) / max(n, m))
 
 
+PART_MIN_LETTERS = 3      # the shortest piece of a long word a broken row may be matched to
+
+
+def _parts(lines: list[str]) -> list[tuple]:
+    """The front and back pieces of every long word (MICRO + BIOLOGY, MICROB + IOLOGY...).
+    Small lettering often traces as two rows split inside a word, where one letter merged
+    with something else; neither piece spells a whole word."""
+    out = []
+    for n, line in enumerate(lines or []):
+        words = [w for w in re.split(r"\s+", line.strip()) if w]
+        for a, word in enumerate(words):
+            w = word.upper()
+            if len(letters_of(w)) < 2 * PART_MIN_LETTERS:
+                continue
+            for k in range(1, len(w)):
+                if k >= PART_MIN_LETTERS:
+                    out.append((w[:k], n, a, a + 1))
+                if len(w) - k >= PART_MIN_LETTERS:
+                    out.append((w[k:], n, a, a + 1))
+    return list(dict.fromkeys(out))
+
+
 def fit_row(glyphs: list, lines: list[str], style: str = "block",
-            satin_max: float = 7.0, min_score: float = 0.3) -> dict | None:
+            satin_max: float = 7.0, min_score: float = 0.3, parts: bool = False) -> dict | None:
     """Find which of the known words a traced row of letters spells, by setting every
     candidate where the row is and keeping the one whose letters best cover the traced
-    ones. Returns {"text", "placements", "score"} or None."""
+    ones. Returns {"text", "placements", "score"} or None. With `parts`, a piece of a long
+    word may match too (the result then has "part": True: only usable with the rest of the
+    word beside it)."""
     best = None
     n = len(glyphs)
     if not n:
@@ -1064,7 +1102,9 @@ def fit_row(glyphs: list, lines: list[str], style: str = "block",
     h = float(np.median([g.bounds[3] - g.bounds[1] for g in glyphs]))
     if w0 > LETTER_MAX_RATIO * h:
         return None                  # solid blobs in a row (windows, say), not letters
-    for cand, line, a, b in _candidates(lines):
+    whole_best = None
+    whole = [(c, False) for c in _candidates(lines)]
+    for (cand, line, a, b), part in whole + ([(c, True) for c in _parts(lines)] if parts else []):
         m = len(letters_of(cand))
         if not (0.6 * n <= m <= 1.5 * n + 1):
             continue
@@ -1072,10 +1112,16 @@ def fit_row(glyphs: list, lines: list[str], style: str = "block",
         if not pls:
             continue
         sc = score(pls, glyphs, style)
+        if not part and (whole_best is None or sc > whole_best[0]):
+            whole_best = (sc, (line, a, b))
         if best is None or sc > best["score"]:
-            best = {"text": cand, "placements": pls, "score": sc, "words": (line, a, b)}
+            best = {"text": cand, "placements": pls, "score": sc, "words": (line, a, b),
+                    "part": part}
     if best is None or best["score"] < min_score:
         return None
+    # which known words the row looks most like as whole words: a piece is only trusted
+    # as one of those (eight letters of KNOXVILLE must not become ENNESSEE, then TENNESSEE)
+    best["whole_words"] = whole_best[1] if whole_best else None
     return best
 
 

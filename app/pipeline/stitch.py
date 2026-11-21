@@ -44,6 +44,9 @@ UNDERLAY_STITCH_MM = 2.0           # stitch length of underlay runs
 # ----------------------------------------------------------------------------- running stitch
 
 TIGHT_CURVE_STITCH_MM = 1.0     # shortest run stitch, used only round small circles
+SMALL_PART_MM2 = 12.0           # a fill smaller than this is a small solid part (sequence)
+TINY_RING_MM = 9.0              # ... and round very small ones (under about 3 mm across)
+TINY_CURVE_STITCH_MM = 0.7      # a shorter stitch still
                                 # (the floor professionals give for small rings)
 SMALL_SHAPE_MM = 25.0           # ... on lines no longer than this (a 8 mm circle)
 MAX_TURN_RAD = math.radians(30)  # a curve may turn this much from one stitch to the next
@@ -82,6 +85,8 @@ def run_points(line: LineString, rules: dict) -> list[tuple[float, float]]:
         steps = [base, min(base, rules["run_stitch_curve_mm"]), min(base, 1.25)]
         if sub.length <= SMALL_SHAPE_MM:          # only small shapes: a long line with one
             steps.append(min(base, TIGHT_CURVE_STITCH_MM))   # tight bend keeps normal stitches
+        if sub.length <= TINY_RING_MM:            # a 2 mm clock face: 1 mm stitches make a
+            steps.append(min(base, TINY_CURVE_STITCH_MM))    # hexagon of it
         for step in steps:
             # equal stitches no shorter than `step` (rounding the count down, not up)
             n = max(1, math.floor(sub.length / step + 1e-9))
@@ -971,6 +976,12 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
         elif obj["kind"] == "satin":
             segments = stitch_satin(obj, rules)
             shape = obj["outline"]
+            if obj.get("block") and segments:
+                # a small block starts and ends at the middle of its two ends (the extra half
+                # stitch lies along the end stitch, unseen): the hop to the next window in a
+                # column is then a short straight drop through the wall, not a diagonal
+                c = np.asarray(obj["center"], float)
+                segments = [[tuple(c[0])] + list(segments[0]) + [tuple(c[-1])]] + segments[1:]
         elif obj.get("texture"):
             segments = stitch_texture(obj, rules)
             shape = obj["poly"]
@@ -986,9 +997,16 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
             shape = obj["poly"]
         if segments:
             stitched.append({"kind": obj["kind"], "color": obj["color"], "segments": segments,
-                             "reversible": obj["kind"] == "run" and obj.get("seq") is None,
+                             "reversible": (obj["kind"] == "run" or bool(obj.get("block")))
+                                           and obj.get("seq") is None,
                              "shape": shape, "area_mm2": obj.get("area_mm2", 0.0),
                              "seq": obj.get("seq"), "punct": obj.get("punct", False),
+                             # small solid parts (windows, panels): the gaps between them
+                             # are part of the design, so no thread may bridge them
+                             "block": bool(obj.get("block")) or (
+                                 obj["kind"] == "fill" and not obj.get("texture")
+                                 and obj.get("text_row") is None and obj.get("seq") is None
+                                 and obj.get("area_mm2", 99.0) < SMALL_PART_MM2),
                              # a line a thread or two wide hides nothing sewn under it
                              "thin": obj["kind"] == "run" and not obj.get("satin_w")})
     if rules.get("knockdown") and stitched:

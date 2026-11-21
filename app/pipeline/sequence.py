@@ -32,6 +32,8 @@ from shapely.strtree import STRtree
 from .common import dist
 
 ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinary stitch
+BLOCK_OPEN_MM = 0.4        # ... but beside small blocks only this much: the gap is the design
+COVER_PAD_MM = 0.15        # stitching hides thread this far past its own edge (thread spread)
 ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
 ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
 ROUTE_CELL_MM = 0.3        # grid used to find it
@@ -201,14 +203,17 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
     thin_shapes = {id(o["shape"]) for o in objects if o.get("thin") and o.get("shape") is not None}
     letter_shapes = {id(o["shape"]) for o in objects
                      if o.get("seq") is not None and o.get("shape") is not None}
+    block_shapes = {id(o["shape"]) for o in objects if o.get("block") and o.get("shape") is not None}
     order_shapes, order_colors, order_thin, order_letter, order_of = [], [], [], [], {}
+    order_block = []
     for n, (color_n, raw_segments) in enumerate(raw_blocks):
         for j, (_sg, shape) in enumerate(raw_segments):
             order_of[(n, j)] = len(order_shapes)
-            order_shapes.append(shape.buffer(0.3) if shape is not None else None)
+            order_shapes.append(shape.buffer(COVER_PAD_MM) if shape is not None else None)
             order_colors.append(color_n)
             order_thin.append(id(shape) in thin_shapes)
             order_letter.append(id(shape) in letter_shapes)
+            order_block.append(id(shape) in block_shapes)
     indexed = [(k, g) for k, g in enumerate(order_shapes) if g is not None]
     tree = STRtree([g for _, g in indexed]) if indexed else None
 
@@ -273,6 +278,8 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         # thin running-stitch letters a connector is as heavy as the letters' own lines
         # and reads as part of them.)
         allowed = ROUTE_OPEN_MM if (order_letter[k] and not order_thin[k]) else ALWAYS_JOIN_MM
+        if order_block[k] or (k > 0 and order_block[k - 1]):
+            allowed = BLOCK_OPEN_MM
         if open_cells * cell > allowed:
             return None
         pts = [(minx + c * cell, miny + r * cell) for r, c in path]
@@ -292,14 +299,21 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         joined = []
         for j, (sg, _shape) in enumerate(raw_segments):
             hop = dist(joined[-1][-1], sg[0]) if joined else None
-            short_ok = hop is not None and hop <= ALWAYS_JOIN_MM and not isinstance(sg, _NewLetter)
             k = order_of[(n, j)]
+            # a hop to or from a small block (a window) crosses the wall between windows: a
+            # stitch there reads as a stem joining them, so it is cut unless hidden
+            blocky = order_block[k] or (j > 0 and order_block[order_of[(n, j - 1)]])
+            limit = BLOCK_OPEN_MM if blocky else ALWAYS_JOIN_MM
+            short_ok = hop is not None and hop <= limit and not isinstance(sg, _NewLetter)
             ok = hop is not None and hop <= rules["trim_jump_mm"] and (
                 short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), k, color))
             if ok:
                 joined[-1] = joined[-1] + list(sg)
                 continue
-            route = hidden_route(joined[-1][-1], sg[0], k, color) if hop is not None else None
+            # (a thin running-stitch letter is never reached by travel: see _NewLetter)
+            route = (hidden_route(joined[-1][-1], sg[0], k, color)
+                     if hop is not None and not (isinstance(sg, _NewLetter) and order_thin[k])
+                     else None)
             if route is not None:
                 joined[-1] = joined[-1] + route + list(sg)
             else:

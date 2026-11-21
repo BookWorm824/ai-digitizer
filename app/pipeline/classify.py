@@ -28,12 +28,13 @@ under the colors sewn after it, so no gap opens where colors meet.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import cv2
 import numpy as np
 import shapely
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import substring, unary_union
 from skimage.morphology import skeletonize
 
@@ -603,6 +604,14 @@ def sewing_order(layers: list, satin_max_mm: float = 7.0) -> list[int]:
     return sorted(area, key=key)
 
 
+def _no_slivers(p: Polygon) -> Polygon:
+    """Without the hairline holes the overlap can leave inside a shape (a seam where two
+    reaches under a thin outline meet, area near zero). They aren't openings; counted as
+    one they make a solid roof measure as a hollow outline."""
+    keep = [h for h in p.interiors if Polygon(h).area >= 0.05]
+    return p if len(keep) == len(p.interiors) else Polygon(p.exterior, keep)
+
+
 def underlap(layers: list, order: list[int], overlap: float) -> dict:
     """Let each color reach `overlap` mm under the colors sewn after it, where they touch.
     It never reaches to within half a millimetre of the far side of the later shape, so a
@@ -621,7 +630,7 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
                 if not reach.is_empty:
                     far_side = later.boundary.difference(p.buffer(0.05))
                     reach = reach.difference(far_side.buffer(overlap + 0.1, quad_segs=4))
-                grown.extend(polygons_of(p.union(reach)) or [p])
+                grown.extend(_no_slivers(q) for q in (polygons_of(p.union(reach)) or [p]))
             out[color] = grown
         mine = unary_union(polys)
         later = mine if later is None else later.union(mine)
@@ -824,7 +833,23 @@ def _web_blobs(poly: Polygon) -> list:
 
 FRAME_MIN_MM2 = 150.0   # a shape this big can be a frame (a building) that holds other shapes
 
+FRAME_ROW_MAX = 5          # only a short row inside a big outline is taken for part of it
+                           # (the panels of a door); a whole word inside a border is a word
+CELL_ROW_MAX = 3           # a row this short sitting snugly in a drawing's opening is part of it
+BAND_MAX_ELONGATION = 8.0  # ... and no longer than this many times its width (a long thin
+                           # bar on its own is a line: running stitch)
+BAND_MAX_COLUMNS = 4   # a small solid shape this many satin columns or fewer is sewn as satin
 BLOCK_MIN_MM = 0.9     # the narrowest block that can be filled (two or three rows of thread)
+
+
+def _elongation(poly: Polygon) -> float:
+    """Length over width of the smallest rectangle around a shape."""
+    rect = poly.minimum_rotated_rectangle
+    c = list(rect.exterior.coords)
+    if len(c) < 4:
+        return float("inf")
+    a, b = math.dist(c[0], c[1]), math.dist(c[1], c[2])
+    return max(a, b) / max(min(a, b), 1e-9)
 
 
 def _compact(poly: Polygon) -> bool:
@@ -861,6 +886,41 @@ def _dot(poly: Polygon, satin_max: float) -> dict | None:
     right = np.column_stack([c.x + xs, c.y + half])
     return {"center": center, "half": half, "left": left, "right": right,
             "outline": Point(c.x, c.y).buffer(r, quad_segs=16)}
+
+
+SMALL_BLOCK_MM = 3.5      # a square-ish block no longer than this is one satin bar
+BAR_MIN_MM = 0.75         # ... at least this wide (a narrow satin, as small lettering uses)
+
+
+def _block(poly: Polygon) -> dict | None:
+    """A small rectangular block (a window 1-3 mm across) as one satin column along its
+    long side, stitches straight across it. 2 x area / outline calls a 1.5 mm square only
+    0.75 mm wide, too thin for anything, and the building lost every window; filled, a
+    block that small is a few one-stitch rows."""
+    if poly.interiors or poly.area <= 0:
+        return None
+    rect = poly.minimum_rotated_rectangle
+    if rect.area <= 0 or poly.area < 0.8 * rect.area:
+        return None
+    c = np.asarray(rect.exterior.coords)[:4]
+    e1, e2 = c[1] - c[0], c[2] - c[1]
+    l1, l2 = float(np.hypot(*e1)), float(np.hypot(*e2))
+    if l1 < l2:
+        e1, e2, l1, l2 = e2, e1, l2, l1
+    if not (BAR_MIN_MM <= l2 and l1 <= SMALL_BLOCK_MM):
+        return None
+    if l1 < 1.3 * l2 and abs(e1[0]) > abs(e1[1]):
+        e1, e2, l1, l2 = e2, e1, l2, l1           # a near-square block runs top to bottom
+    u, n = e1 / l1, e2 / l2                       # along the long side, across it
+    mid = c.mean(axis=0)
+    # (sewn a little inside its edges: thread spreads and satin ends push out, and the
+    # half-millimetre walls between windows must stay open)
+    reach = max(0.3 * l1, l1 / 2.0 - 0.25)
+    ts = np.linspace(-reach, reach, max(4, int(math.ceil(2 * reach / 0.25)) + 1))
+    center = mid + ts[:, None] * u
+    half = np.full(len(ts), max(0.35, l2 / 2.0 - 0.12))
+    return {"center": center, "half": half, "left": center - half[:, None] * n,
+            "right": center + half[:, None] * n, "outline": rect}
 
 
 def _fit_fills_to_lines(objects: list) -> None:
@@ -931,11 +991,46 @@ def _cover_text_scraps(objects: list, shapes: dict, done: set, fits: dict) -> No
             areas.setdefault(o["color"], []).append(g.buffer(0.4))
     for color, parts in areas.items():
         cover = unary_union(parts)
+        # the band the retyped words fill: a small scrap of the old letters left inside it
+        # (a serif, the broken tail of a Y) would be sewn as a stray mark beside them
+        bands = [box(*g.bounds).buffer(0.5) for g in polygons_of(cover.buffer(1.5))]
+        small = 0.5 * float(np.median([g.area for g in parts])) if parts else 0.0
         for i, poly in enumerate(shapes.get(color, [])):
             if (color, i) in done or poly.area <= 0:
                 continue
             if poly.intersection(cover).area >= 0.6 * poly.area:
                 done.add((color, i))
+            elif poly.area <= small and any(b.contains(poly) for b in bands):
+                done.add((color, i))
+
+
+PART_WHOLE_SHARE = 0.75   # a piece with this share of its word's letters stands for the word
+
+
+def _complete_word(fit: dict, text: list[str], box: list):
+    """A piece of a long word found alone (MICROBIOLOG..., ICROBIOLOGY when the M merged into
+    a border at cap size): when it holds most of the word, (the whole word, the row's box
+    widened on the side the missing letters belong). Otherwise None."""
+    line, a, _b = fit["words"]
+    ww = fit.get("whole_words")
+    if not ww or ww[0] != line or not ww[1] <= a < ww[2]:
+        return None              # the row as a whole looks like other words: not this one
+    words = [w for w in re.split(r"\s+", text[line].strip()) if w]
+    if a >= len(words):
+        return None
+    word, piece = words[a].upper(), fit["text"].upper()
+    if len(piece) < PART_WHOLE_SHARE * len(word):
+        return None
+    missing = len(word) - len(piece)
+    pitch = (box[2] - box[0]) / max(len(piece), 1)
+    x0, x1 = box[0], box[2]
+    if word.startswith(piece):
+        x1 += missing * pitch
+    elif word.endswith(piece):
+        x0 -= missing * pitch
+    else:
+        return None
+    return words[a], (x0, box[1], x1, box[3])
 
 
 def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
@@ -946,8 +1041,8 @@ def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
     letters were squeezed into each other are re-set evenly too. Returns the rows taken."""
     infos = {i["row"]: i for i in row_info}
     taken: set = set()
-    for row, fit in sorted(fits.items(), key=lambda kv: -kv[1]["score"]):
-        if row in taken:
+    for row, fit in sorted(list(fits.items()), key=lambda kv: -kv[1]["score"]):
+        if row in taken or row not in fits:
             continue
         info = infos[row]
         h = info["height"]
@@ -979,6 +1074,27 @@ def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
                 members.append(r2)
                 grew = True
         pls = fit["placements"]
+        if len(members) > 1 and fit.get("part"):
+            # a piece of a word that gathered neighbours: together they must look most like
+            # that word's line, or the piece matched by chance (a scrap of KNOXVILLE read as
+            # part of TENNESSEE)
+            together = [g for r2 in members for g in infos[r2]["glyphs"]]
+            check = lettering.fit_row(together, text, style, min_score=0.0)
+            if not check or check["words"][0] != line:
+                fits.pop(row)
+                continue
+        if len(members) == 1 and fit.get("part"):
+            whole = _complete_word(fit, text, box)
+            if whole is None:
+                fits.pop(row)            # a piece of a word with no rest of it beside it
+            else:
+                new_text, wbox = whole   # nearly all of it: a letter or two merged away
+                H = float(np.median([pl.H for pl in pls]))
+                w = float(np.median([pl.w for pl in pls]))
+                run = sum(pl.run for pl in pls) * 2 >= len(pls)
+                fit["placements"] = lettering.fit_line(new_text, wbox, H, w, style, run)
+                fit["text"], fit["part"] = new_text, False
+            continue
         if len(members) == 1 and not lettering.overlapping(pls, style):
             continue
         new_text = text[line] if len(members) > 1 else fit["text"]
@@ -1010,6 +1126,11 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         order.remove(vec["inside_color"])
         order.insert(0, vec["inside_color"])
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
+    # colors that draw lines (a web of outlines somewhere in them): their narrow parts are
+    # lines. In any other color a narrow part is a solid shape that happens to be small.
+    line_colors = {c for c, polys in shapes.items()
+                   if any(len(q.interiors) >= NETWORK_HOLES and typical_width(q) < NETWORK_MAX_MM
+                          for q in polys)}
     textures = _foliage(shapes, plan)
     rows = text_rows(shapes, order, rules)
     inside = vec.get("inside_color")
@@ -1110,7 +1231,7 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             objects.append(o)
         return True
 
-    def sew_narrow(part, color):
+    def sew_narrow(part, color, alone=True):
         """A part that is narrow all over: satin if it is a real column, bean lines if it is
         thin or a web of outlines, otherwise a fill."""
         nonlocal dropped
@@ -1124,12 +1245,25 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 if rest.area >= min_area and not _web_blobs(rest):
                     sew_narrow(rest, color)
             return
-        dot = _dot(part, rules["satin_max_mm"]) if use_satin else None
+        dot = (_dot(part, rules["satin_max_mm"]) or _block(part)) if use_satin else None
         if dot:
             # (little pull compensation: a dot stretched along its stitches sews as an oval)
-            add_satin([dot], color, {"comp_scale": 0.5, "underlay": "none"})
+            add_satin([dot], color, {"comp_scale": 0.5, "underlay": "none", "block": True})
             return
         w = typical_width(part)
+        if (alone and use_satin and color not in line_colors and not part.interiors
+                and BLOCK_MIN_MM <= w < satin_min and not rules.get("knockdown", False)
+                and _elongation(part) <= BAND_MAX_ELONGATION):
+            # A small solid shape of a color that draws no lines (a roof a millimetre deep
+            # at cap size) keeps its mass as a narrow satin band, as production files sew
+            # anything from about 1 mm. As an outline it reads as a hollow box.
+            cols = try_satin(part, rules)
+            if cols and len(cols) <= BAND_MAX_COLUMNS:
+                add_satin(cols, color, {"comp_scale": 0.5})
+                return
+            if part.area >= min_area:
+                add_fill(part, color)          # (a small gable triangle: solid, not a frame)
+                return
         if w < satin_min and w >= BLOCK_MIN_MM and part.area >= min_area and _compact(part):
             # A small solid block (a window a millimetre or so wide) is still a block: sewn
             # as one line it loses its mass and the building loses its windows.
@@ -1273,14 +1407,27 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         # like a short word.
         frames = [Polygon(q.exterior) for polys in shapes.values() for q in polys
                   if q.area >= FRAME_MIN_MM2]
+        # the openings of line drawings (a web of outlines, not a single box or ring around
+        # a word): what sits snugly inside one is part of the drawing
+        cells = [Polygon(h) for polys in shapes.values() for q in polys
+                 if len(q.interiors) >= NETWORK_HOLES for h in q.interiors]
         for info in row_info:
             h = info["height"]
             if h < rules.get("drop_text_mm", 0.0):
                 continue
             ug = unary_union(info["glyphs"])
-            if any(f.contains(ug.centroid) and not any(f.equals(Polygon(g.exterior))
+            if len(info["glyphs"]) <= FRAME_ROW_MAX and any(
+                    f.contains(ug.centroid) and not any(f.equals(Polygon(g.exterior))
                                                         for g in info["glyphs"])
-                   and f.area > 8.0 * ug.convex_hull.area for f in frames):
+                    and f.area > 8.0 * ug.convex_hull.area for f in frames):
+                info["not_text"] = True
+                continue
+            if len(info["glyphs"]) <= CELL_ROW_MAX and any(
+                    cell.contains(ug.centroid) and cell.area < 6.0 * ug.convex_hull.area
+                    for cell in cells):
+                # (at cap size a building's ink is too little to count as a frame, but the
+                # door bars still sit snugly in one opening of its drawing. Only a few
+                # shapes: a long word inside a border drawn round it is still a word.)
                 info["not_text"] = True
                 continue
             style = "block"
@@ -1297,7 +1444,8 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 continue
             if h >= lettering.SERIF_MIN_MM and lettering.has_serifs(info["glyphs"]):
                 style = "varsity"          # the closest embroidery style to serif lettering
-            fit = lettering.fit_row(info["glyphs"], text, style, rules["satin_max_mm"])
+            fit = lettering.fit_row(info["glyphs"], text, style, rules["satin_max_mm"],
+                                    parts=h < RETYPE_AUTO_MM)
             if fit:
                 fit["style"] = style
                 fits[info["row"]] = fit
@@ -1416,11 +1564,12 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 else:
                     dropped += 1
             for piece in arms:
-                sew_narrow(piece, color)
+                sew_narrow(piece, color, alone=False)
 
     bounds = vec.get("bounds") or unary_union(
         [q for layer in vec["layers"] for q in layer["polys"]]).bounds
     _match_mirrors(objects, bounds)
+    _match_mirror_lines(objects, bounds, rules.get("satin_net_min_mm", 1.1))
     _fit_fills_to_lines(objects)
 
     if debug_dir is not None and objects:
@@ -1470,6 +1619,47 @@ def _match_mirrors(objects: list, bounds) -> None:
                 continue
             objects[i] = {"kind": "fill", "color": a["color"], "poly": ga.buffer(0),
                           "area_mm2": float(ga.area)}
+            break
+
+
+def _match_mirror_lines(objects: list, bounds, satin_from: float) -> None:
+    """Lines on the two sides of a design drawn alike (the rules either side of a dot) are
+    sewn alike. Measured separately, one can come out a hair over the satin width and the
+    other a hair under: one heavy satin bar beside one thin running line. Both get the
+    weight their average width calls for."""
+    minx, _miny, maxx, _maxy = bounds
+    cx = (minx + maxx) / 2
+    span = max(maxx - minx, 1e-6)
+    lines = [k for k, o in enumerate(objects) if o["kind"] == "run" and o.get("route")
+             and o.get("seq") is None and o.get("text_row") is None]
+    used = set()
+    for i in lines:
+        if i in used:
+            continue
+        a = objects[i]
+        ax0, ay0, ax1, ay1 = a["line"].bounds
+        for j in lines:
+            if j == i or j in used or objects[j]["color"] != a["color"]:
+                continue
+            b = objects[j]
+            bx0, by0, bx1, by1 = b["line"].bounds
+            tol = max(0.6, 0.04 * span)
+            if abs((ax0 + ax1) - 2 * cx + (bx0 + bx1) - 2 * cx) / 2 > tol:
+                continue
+            if abs((ay0 + ay1) - (by0 + by1)) / 2 > tol or abs((ax1 - ax0) - (bx1 - bx0)) > tol                     or abs((ay1 - ay0) - (by1 - by0)) > tol:
+                continue
+            if abs((ax0 + ax1) / 2 - cx) < 0.5:
+                continue                          # on the centre line: its own mirror
+            used.update((i, j))
+            sa, sb = a.get("satin_w"), b.get("satin_w")
+            if bool(sa and any(sa)) == bool(sb and any(sb)):
+                break
+            w = (a.get("width_mm", 0.0) + b.get("width_mm", 0.0)) / 2.0
+            have, lack = (a, b) if sa and any(sa) else (b, a)
+            if w >= satin_from and len(have["route"]) == len(lack["route"]):
+                lack["satin_w"] = list(have["satin_w"])
+            else:
+                have.pop("satin_w", None)
             break
 
 
