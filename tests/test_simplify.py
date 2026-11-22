@@ -98,3 +98,34 @@ def test_a_small_line_of_text_is_not_taken_for_a_drawing():
         d.line([(x, 240), (x + 90, 240)], fill="black", width=3)
     a = simplify.analyse(intake.run(_png(img)), 52.0, 6.0)
     assert a["drawings"] == []
+
+
+def test_a_window_grid_too_fine_for_thread_is_thinned_to_fit():
+    # a 4 x 3 grid of 1 mm windows 0.6 mm apart (cap size): fewer, bigger blocks with at least
+    # a millimetre of wall between them, spread over the same field (cartographic typification)
+    import cv2
+    from app.pipeline import simplify as sp
+    ppm = 20.0
+    body = np.ones((400, 400), bool)
+    cands = [((10 + 1.6 * k) * ppm, (10 + 1.6 * r) * ppm, 1.0 * ppm, 1.0 * ppm)
+             for r in range(3) for k in range(4)]
+    out = sp._window_grid(cands, ppm, body)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(out.astype(np.uint8), connectivity=4)
+    blocks = n - 1
+    assert blocks == 6                       # 4 x 3 becomes 3 x 2
+    xs = sorted({int(st[i, 0]) for i in range(1, n)})
+    widths = [st[i, 2] / ppm for i in range(1, n)]
+    assert min(widths) >= 0.95
+    gaps = [(b - a) / ppm - max(widths) for a, b in zip(xs, xs[1:])]
+    assert all(g >= 0.9 for g in gaps)
+    # the field is kept: blocks still span the original grid's width
+    assert (st[1:, 0].min() / ppm) <= 10.0 and ((st[1:, 0] + st[1:, 2]).max() / ppm) >= 14.3
+
+
+def test_marks_that_line_up_with_nothing_are_not_windows():
+    from app.pipeline import simplify as sp
+    ppm = 20.0
+    body = np.ones((200, 200), bool)
+    cands = [(20 * ppm, 20 * ppm, ppm, ppm), (70 * ppm, 45 * ppm, ppm, ppm),
+             (40 * ppm, 80 * ppm, ppm, ppm), (90 * ppm, 10 * ppm, ppm, ppm)]
+    assert not sp._window_grid(cands, ppm, body).any()

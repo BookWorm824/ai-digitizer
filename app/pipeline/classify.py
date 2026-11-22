@@ -66,6 +66,8 @@ NETWORK_HOLES = 3        # a narrow shape with this many openings is a web of ou
 NETWORK_MAX_MM = 2.0     # ...and is sewn as lines when its strokes are thinner than this
 GLYPH_STROKE_RATIO = 0.42  # stroke width / height of a letter (a solid square is 0.5)
 BOLD_TEXT_STROKE = 0.2   # traced letters with strokes this share of their height are bold
+BIG_RETYPE_STROKE_MM = 1.2  # words of RETYPE_AUTO_MM and up that would be filled are retyped
+                            # only when their strokes are thinner than this
 RETYPE_AUTO_MM = 8.0     # "auto" retypes known words shorter than this (research rules 5, 6)
 
 
@@ -836,6 +838,7 @@ FRAME_MIN_MM2 = 150.0   # a shape this big can be a frame (a building) that hold
 
 FRAME_ROW_MAX = 5          # only a short row inside a big outline is taken for part of it
                            # (the panels of a door); a whole word inside a border is a word
+MIXED_ROW_RATIO = 3.0      # a row whose tallest shape is this many times its shortest is mixed
 CELL_ROW_MAX = 3           # a row this short sitting snugly in a drawing's opening is part of it
 BAND_MAX_ELONGATION = 8.0  # ... and no longer than this many times its width (a long thin
                            # bar on its own is a line: running stitch)
@@ -890,6 +893,7 @@ def _dot(poly: Polygon, satin_max: float) -> dict | None:
 
 
 SMALL_BLOCK_MM = 3.5      # a square-ish block no longer than this is one satin bar
+BLOCK_SHRINK_FROM_MM = 1.3  # blocks this wide or more are sewn a little inside their edges
 BAR_MIN_MM = 0.75         # ... at least this wide (a narrow satin, as small lettering uses)
 
 
@@ -916,10 +920,13 @@ def _block(poly: Polygon) -> dict | None:
     mid = c.mean(axis=0)
     # (sewn a little inside its edges: thread spreads and satin ends push out, and the
     # half-millimetre walls between windows must stay open)
-    reach = max(0.3 * l1, l1 / 2.0 - 0.25)
+    # (only blocks of a good size: a 1 mm window shrunk the same way sews as a dash, and
+    # the walls around a block that small were already kept open when it was drawn)
+    small = l2 < BLOCK_SHRINK_FROM_MM
+    reach = l1 / 2.0 - (0.08 if small else 0.25)
     ts = np.linspace(-reach, reach, max(4, int(math.ceil(2 * reach / 0.25)) + 1))
     center = mid + ts[:, None] * u
-    half = np.full(len(ts), max(0.35, l2 / 2.0 - 0.12))
+    half = np.full(len(ts), l2 / 2.0 - (0.0 if small else 0.12))
     return {"center": center, "half": half, "left": center - half[:, None] * n,
             "right": center + half[:, None] * n, "outline": rect}
 
@@ -1083,11 +1090,13 @@ def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
             check = lettering.fit_row(together, text, style, min_score=0.0)
             if not check or check["words"][0] != line:
                 fits.pop(row)
+                info["lone_piece"] = True
                 continue
         if len(members) == 1 and fit.get("part"):
             whole = _complete_word(fit, text, box)
             if whole is None:
                 fits.pop(row)            # a piece of a word with no rest of it beside it
+                info["lone_piece"] = True
             else:
                 new_text, wbox = whole   # nearly all of it: a letter or two merged away
                 H = float(np.median([pl.H for pl in pls]))
@@ -1440,7 +1449,9 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 # and a satin font beats ragged fill on 2-6 mm strokes.
                 mode, _tried = plan_row(info["row"], row_keys[info["row"]], h)
                 stroke = float(np.median([typical_width(g) for g in info["glyphs"]]))
-                want = mode == "fill" and stroke < FILL_TEXT_MM
+                # (only thin-stroked ones: big heavy lettering, a serif TENNESSEE at left
+                # chest, keeps its own character as a fill; the block font made it plain)
+                want = mode == "fill" and stroke < BIG_RETYPE_STROKE_MM
             if not want:
                 continue
             if h >= lettering.SERIF_MIN_MM and lettering.has_serifs(info["glyphs"]):
@@ -1451,9 +1462,15 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                 fit["style"] = style
                 fits[info["row"]] = fit
         claimed = []
-        for row, fit in sorted(fits.items(), key=lambda kv: -kv[1]["score"]):
+        # (whole words claim first: a piece of a word matched by chance in a row of trees
+        # and windows must never take the word from the row that really spells it)
+        for row, fit in sorted(fits.items(), key=lambda kv: (bool(kv[1].get("part")),
+                                                              -kv[1]["score"])):
             line, a, b = fit["words"]
             if any(line == l2 and a < b2 and a2 < b for l2, a2, b2 in claimed):
+                if fit.get("part"):
+                    # a piece of a word another row really spells: matched by chance
+                    next(i for i in row_info if i["row"] == row)["lone_piece"] = True
                 del fits[row]
             else:
                 claimed.append((line, a, b))
@@ -1479,8 +1496,18 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         blocks = len(info["glyphs"]) >= 2 and all(_compact(g) and g.area >= 0.85
                                                   * g.minimum_rotated_rectangle.area
                                                   for g in info["glyphs"])
-        unspelled = bool(text) and (info["color"] == inside or blocks) and not lettering.fit_row(
-            info["glyphs"], text, "block", rules["satin_max_mm"])
+        # (any row: trees and window blocks lined up across a building's wings are not a
+        # word either, and as "letters" they were sewn as thin outlines. Letters of a word are
+        # much the same height; a tree beside millimetre windows is not. A row that spells
+        # at least a piece of a known word and is even in height may still be a broken word.)
+        hs = [g.bounds[3] - g.bounds[1] for g in info["glyphs"]]
+        mixed = len(hs) >= 2 and max(hs) > MIXED_ROW_RATIO * min(hs)
+        unspelled = bool(text) and (
+            info.get("lone_piece")       # its only match was a stray piece of a word
+            or not lettering.fit_row(info["glyphs"], text, "block", rules["satin_max_mm"],
+                                     parts=True)
+            or (mixed and not lettering.fit_row(info["glyphs"], text, "block",
+                                                rules["satin_max_mm"])))
         if unspelled or (blocks and not text):
             info["text"] = None
             info["not_text"] = True

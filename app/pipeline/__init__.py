@@ -81,7 +81,7 @@ def run_pipeline(data: bytes, out_dir: Path, name: str = "design", *,
         simple = simplify.run(img, fit_w_mm, fit_h_mm, debug_dir)
         if simple is not None:
             img = simple
-            rules["drawn_line_mm"] = simplify.LINE_W_MM     # its lines are this wide
+            rules["drawn_line_mm"] = simple.get("line_mm", simplify.LINE_W_MM)  # its lines
     say("clean")
     cleaned = clean.run(img, fit_w_mm, fit_h_mm, rules, debug_dir)
     say("vectorize")
