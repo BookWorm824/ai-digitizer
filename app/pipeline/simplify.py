@@ -33,6 +33,8 @@ WORK_PPM = 20.0          # pixels per mm at the stitched size (0.05 mm per pixel
 FINE_STROKE_MM = 0.5     # a drawing whose typical line is thinner than this is too fine
 GROUP_MM = 0.6           # ink closer than this belongs to one drawing
 MIN_DRAWING_MM = 10.0    # only drawings at least this big are simplified (not letters)
+FRINGE_MM = 0.15         # dark pixels this close to a colored shape may be its blended edge
+FRINGE_SHARE = 0.5       # ... a drawing needs at least this share of its ink away from them
 MIN_JUNCTIONS = 40       # ... and only busy ones (a line drawing, not a simple shape)
 TEXT_LINE_MM = 6.0       # a group shorter than this and 3 x as wide is a line of text
 CELL_R_MM = 0.6          # a white cell must hold a 1.2 mm circle to stay open fabric
@@ -58,7 +60,10 @@ WALL_MM = 1.0              # ...leaving at least this much wall open to its neig
 WINDOW_BAR_MM = 1.2        # a facade one window high (or wide) becomes a bar this thick
 FACADE_LINK_MM = 2.6       # windows this near in a row or column belong to one facade
 WINDOW_CLEAR_MM = 0.35     # lines keep this far from window blocks...
+BETWEEN_MM = 1.2           # looking this far to each side of a line for windows
 WINDOW_LINE_SHARE = 0.25   # ...and a line this much beside windows is a floor line: dropped
+TREE_MIN_MM2 = 6.0         # a solid mass this big beside the building is a tree
+BUILDING_MIN_MM2 = 20.0    # ...and the building outlined around them at least this big
 SOLID_GAP_MM = 0.35        # lines keep this far from solid shapes (trees stay solid)
 WINDOW_MAX_MM2 = 5.0       # dense spots up to this big are blocks (windows)...
 MASS_COVER = 0.55          # ...bigger ones are solid only if this densely inked (trees)
@@ -113,6 +118,9 @@ def analyse(img: dict, fit_w_mm: float, fit_h_mm: float) -> dict:
         a = np.ones((H, W), bool)
     colored = (sat > 0.35) & (val > 0.35) & a
     ink = (val < 0.55) & ~colored & a
+    # the blended edge of a colored shape shrinks to a thin ring of dark pixels: that is
+    # not a pen drawing (a bold monogram in deep green measured as a fine, busy drawing)
+    fringe = cv2.dilate(colored.astype(np.uint8), _disk(FRINGE_MM * ppm)).astype(bool)
     groups = cv2.dilate(ink.astype(np.uint8), _disk(GROUP_MM * ppm / 2.0))
     n, lab, stats, _ = cv2.connectedComponentsWithStats(groups, connectivity=8)
     drawings = []
@@ -124,6 +132,8 @@ def analyse(img: dict, fit_w_mm: float, fit_h_mm: float) -> dict:
             continue                     # a line of lettering: it is retyped, never redrawn
         region = lab == k
         part = ink & region
+        if (part & ~fringe).sum() < FRINGE_SHARE * part.sum():
+            continue                     # only the edges of colored shapes
         if _stroke_mm(part, ppm) >= FINE_STROKE_MM:
             continue                     # bold lines or shapes: sewable as drawn
         # busy? count junctions of all the ink inside its outline (windows drawn as
@@ -264,7 +274,11 @@ def rebuild(part: np.ndarray, col: np.ndarray, ppm: float) -> tuple:
         if MIN_WINDOW_MM2 <= area <= WINDOW_MAX_MM2 and max(bw, bh) <= 3.0 * min(bw, bh):
             cands.append((float(cen[i][0]), float(cen[i][1]), float(bw), float(bh)))
     masses = solid.copy()                 # trees and other big solids (not windows)
-    windows = _window_grid(cands, ppm, body)
+    # windows keep a wall's width from the building's outline (filled out to their field,
+    # the bottom row reached the base line, and the line was erased beside them)
+    edge = _building_edge(inside, masses, w, ppm)
+    keep_out = cv2.dilate(edge.astype(np.uint8), _disk(WALL_MM * ppm)).astype(bool)
+    windows = _window_grid(cands, ppm, body & ~keep_out, keep_out)
     mirror = _mirror_axis(inside)
     if mirror is not None:
         # a symmetric building has matching wings: windows found on one side are given to
@@ -289,7 +303,11 @@ def rebuild(part: np.ndarray, col: np.ndarray, ppm: float) -> tuple:
     near = max(1, int(round(MERGE_MM * ppm)))
     # an inner line closer than INNER_EDGE_MM to the outline only echoes it (tutorials: inner
     # lines only where they sit at least 2 mm from every parallel edge)
-    zone = cv2.dilate(outline.astype(np.uint8), _disk(INNER_EDGE_MM * ppm))
+    # (measured from the building's own outline: the part of the drawing's outline that
+    # hugs the trees is left out below, and the wing walls beside the trees are real lines)
+    trees_near = cv2.dilate(masses.astype(np.uint8), _disk((SOLID_GAP_MM + 0.3) * ppm)).astype(bool)
+    keep_outline = (outline & ~trees_near) | edge
+    zone = cv2.dilate(keep_outline.astype(np.uint8), _disk(INNER_EDGE_MM * ppm))
     drawn = np.zeros(part.shape, np.uint8)
     for x0, y0, x1, y1 in segs:
         one = np.zeros(part.shape, np.uint8)
@@ -297,8 +315,9 @@ def rebuild(part: np.ndarray, col: np.ndarray, ppm: float) -> tuple:
         on = one.astype(bool)
         if not on.any() or zone[on].mean() > MERGE_SHARE:
             continue
-        if by_window[on].mean() > WINDOW_LINE_SHARE:
-            continue                  # a floor or stonework line through the window rows
+        if by_window[on].mean() > WINDOW_LINE_SHARE and _between_windows(on, windows, ppm,
+                                                                          x0, y0, x1, y1):
+            continue                  # a floor or stonework line between the window rows
         drawn |= one
         zone |= cv2.dilate(one, _disk(near))
     lines = cv2.dilate(drawn, _disk(w / 2.0)).astype(bool) & inside
@@ -306,7 +325,87 @@ def rebuild(part: np.ndarray, col: np.ndarray, ppm: float) -> tuple:
     # sewn as part of the line drawing (hollow), not as a solid
     apart = cv2.dilate(masses.astype(np.uint8), _disk(SOLID_GAP_MM * ppm)).astype(bool)
     apart |= by_window                # windows stay separate blocks, never part of a line
-    return solid, (lines | outline) & ~col & ~apart, inside
+    return solid, (lines | outline | edge) & ~col & ~apart, inside
+
+
+def _between_windows(on: np.ndarray, windows: np.ndarray, ppm: float,
+                     x0: float, y0: float, x1: float, y1: float) -> bool:
+    """Does a line run between windows (windows on both sides of it), rather than along
+    the edge of a window field (a base or eaves line, which the building needs)?"""
+    d = max(1, int(round(BETWEEN_MM * ppm)))
+    dx, dy = x1 - x0, y1 - y0
+    L = max(np.hypot(dx, dy), 1e-6)
+    nx, ny = int(round(-dy / L * d)), int(round(dx / L * d))   # a step across the line
+    ys, xs = np.nonzero(on)
+    h, w = windows.shape
+    near = cv2.dilate(windows.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+
+    def side(sx, sy):
+        a, b = ys + sy, xs + sx
+        ok = (a >= 0) & (a < h) & (b >= 0) & (b < w)
+        hit = np.zeros(len(ys), bool)
+        hit[ok] = near[a[ok], b[ok]]
+        return hit.mean()
+    share = max(side(k * nx // 3, k * ny // 3) for k in (1, 2, 3))
+    other = max(side(-k * nx // 3, -k * ny // 3) for k in (1, 2, 3))
+    return min(share, other) > 0.15
+
+
+def _clear_field(keep_out: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> tuple:
+    """A rectangle (pixels) shrunk side by side until it holds none of keep_out."""
+    h, w = keep_out.shape
+    X0, Y0, X1, Y1 = int(np.floor(x0)), int(np.floor(y0)), int(np.ceil(x1)), int(np.ceil(y1))
+    X0, Y0, X1, Y1 = max(0, X0), max(0, Y0), min(w, X1), min(h, Y1)
+    for _ in range(4 * max(1, X1 - X0 + Y1 - Y0)):
+        if X1 <= X0 or Y1 <= Y0:
+            break
+        box = keep_out[Y0:Y1, X0:X1]
+        if not box.any():
+            break
+        # shrink the side with the most keep-out along it
+        sides = {"top": box[0].sum(), "bottom": box[-1].sum(),
+                 "left": box[:, 0].sum(), "right": box[:, -1].sum()}
+        side = max(sides, key=sides.get)
+        if sides[side] == 0:
+            ys, xs = np.nonzero(box)          # keep-out inside: cut from the nearest side
+            cy, cx = ys.mean(), xs.mean()
+            side = min((("top", cy), ("bottom", box.shape[0] - cy), ("left", cx),
+                        ("right", box.shape[1] - cx)), key=lambda t: t[1])[0]
+        if side == "top":
+            Y0 += 1
+        elif side == "bottom":
+            Y1 -= 1
+        elif side == "left":
+            X0 += 1
+        else:
+            X1 -= 1
+    return float(X0), float(Y0), float(X1), float(Y1)
+
+
+def _building_edge(inside: np.ndarray, masses: np.ndarray, w: int, ppm: float) -> np.ndarray:
+    """The building's own outline: the drawing's silhouette with the trees beside it cut out
+    (and any holes filled), one line wide. Around the whole drawing the outline only hugged
+    the trees, and the walls beside them had none: the windows floated."""
+    n, lab, st, _ = cv2.connectedComponentsWithStats(masses.astype(np.uint8), connectivity=8)
+    trees = np.zeros(masses.shape, bool)
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] >= TREE_MIN_MM2 * ppm * ppm:
+            trees |= lab == i
+    if not trees.any():
+        return np.zeros(inside.shape, bool)
+    cut = cv2.dilate(trees.astype(np.uint8), _disk((SOLID_GAP_MM + 0.15) * ppm)).astype(bool)
+    building = (inside & ~cut).astype(np.uint8)
+    building = cv2.morphologyEx(building, cv2.MORPH_OPEN, _disk(w))
+    # holes filled: only the outer edge is an outline
+    ff = building.copy()
+    flood = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
+    cv2.floodFill(ff, flood, (0, 0), 1)
+    building = (building | (ff == 0)).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(building, connectivity=8)
+    keep = np.zeros(n, bool)
+    keep[1:] = st[1:, cv2.CC_STAT_AREA] >= BUILDING_MIN_MM2 * ppm * ppm
+    building = keep[lab].astype(np.uint8)
+    return (building > 0) & ~cv2.erode(building, _disk(w)).astype(bool)
 
 
 def _mirror_axis(mask: np.ndarray) -> float | None:
@@ -349,7 +448,8 @@ def _clusters(vals: list, tol: float) -> list:
     return [(float(np.mean([vals[i] for i in g])), g) for g in groups]
 
 
-def _window_grid(cands: list, ppm: float, body: np.ndarray) -> np.ndarray:
+def _window_grid(cands: list, ppm: float, body: np.ndarray,
+                 keep_out: np.ndarray | None = None) -> np.ndarray:
     """Window spots (cx, cy, w, h in pixels) as a clean window grid for the stitched size.
     Spots are lined up on rows and columns and grouped into facades; each facade's grid is
     then thinned to what thread can show (cartographic typification; Erich Campbell cuts a
@@ -394,6 +494,11 @@ def _window_grid(cands: list, ppm: float, body: np.ndarray) -> np.ndarray:
         x1 = max(cands[i][0] + cands[i][2] / 2 for i in members)
         y0 = min(cands[i][1] - cands[i][3] / 2 for i in members)
         y1 = max(cands[i][1] + cands[i][3] / 2 for i in members)
+        if keep_out is not None:
+            # the field shrinks back from anything it must keep clear of (the outline)
+            x0, y0, x1, y1 = _clear_field(keep_out, x0, y0, x1, y1)
+            if x1 - x0 < WINDOW_MIN_MM * unit or y1 - y0 < WINDOW_MIN_MM * unit:
+                continue
         fw, fh = (x1 - x0) / unit, (y1 - y0) / unit           # the field, in mm
 
         def fit(n_have, span):

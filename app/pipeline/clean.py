@@ -25,6 +25,81 @@ from .common import BG, PipelineError, save_debug
 
 MERGE_DELTA_E = 9.0     # colors closer than this are treated as the same color
 TINY_CLUSTER = 0.002    # a color covering less than this share of the design is dropped
+THIN_SHARE = 0.6        # a color this much made of thin lines is lettering or line work
+INK_SHARE = 0.4         # thin strokes take their color from this share of their pixels
+SOLID_CORE = 0.25       # a color whose solid core is less than this share of it is thin
+
+
+COUNTER_MIN_MM2 = 0.12  # a hole in a letter at least this big in the picture is kept open
+COUNTER_OPEN_MM = 0.8   # ... at least this wide (pros keep 0.8-1 mm; this keeps the shape)
+COUNTER_SHAPE_MM = (4.0, 30.0)  # ... in shapes (letters, words) this tall
+COUNTER_STROKY = 0.72   # ... made of strokes: covering less than this share of their box (a disc 0.79)
+COUNTER_WALL_PX = 2.5   # ... leaving the stroke around it at least this wide (work pixels)
+COUNTER_MAX_HOLES = 3   # only shapes with this few holes (letters, not a drawing's web)
+
+
+def _open_counters(labels: np.ndarray, full: np.ndarray, n_colors: int, ppm: float,
+                   mm_per_src_px: float) -> np.ndarray:
+    """Holes inside small, letter-like shapes (at most a few holes each) that exist in the
+    full-size picture but closed when it was shrunk to the stitch size are opened again,
+    at least COUNTER_OPEN_MM across, keeping a pixel of the shape all round them. A closed
+    counter changes what a letter says (e reads c); the gaps of a detailed drawing are left
+    to the simplifier."""
+    H, W = labels.shape
+    out = labels.copy()
+    min_px = COUNTER_MIN_MM2 / (mm_per_src_px ** 2)
+    for i in range(n_colors):
+        m_full = (full == i).astype(np.uint8)
+        if not m_full.any():
+            continue
+        n_c, comp, cst, _ = cv2.connectedComponentsWithStats(m_full, connectivity=8)
+        n_h, hole, st, _ = cv2.connectedComponentsWithStats(1 - m_full, connectivity=4)
+        hh, ww = full.shape
+        found = {}
+        for h in range(1, n_h):
+            x, y, w_, h_, area = st[h]
+            if x == 0 or y == 0 or x + w_ >= ww or y + h_ >= hh:
+                continue                                  # open to the outside
+            ys, xs = np.nonzero(hole[y:y + h_, x:x + w_] == h)
+            # the shape around it: a pixel just left of its leftmost point
+            k = int(np.argmin(xs))
+            px, py = x + xs[k] - 1, y + ys[k]
+            owner = int(comp[py, px]) if px >= 0 else 0
+            if owner:
+                found.setdefault(owner, []).append((h, area))
+        for owner, holes in found.items():
+            if len(holes) > COUNTER_MAX_HOLES:
+                continue
+            _x, _y, cw, ch, carea = cst[owner]
+            tall = ch * mm_per_src_px
+            letter_sized = COUNTER_SHAPE_MM[0] <= tall <= COUNTER_SHAPE_MM[1]
+            if not letter_sized or carea > COUNTER_STROKY * cw * ch:
+                # (text under 4 mm can't sew an open counter and is retyped; a solid block
+                # or a big shape with a pinhole is not a letter)
+                continue
+            for h, area in holes:
+                if area < min_px:
+                    continue
+                x, y, w_, h_, _a = st[h]
+                small = cv2.resize((hole == h).astype(np.float32), (W, H), interpolation=cv2.INTER_AREA)
+                spot = small > 0.25
+                if not spot.any():
+                    spot = small >= small.max() * 0.999
+                if (out[spot] == i).mean() < 0.8:
+                    continue          # still open, or something else is there (not closed up)
+                mine = out == i
+                # never thin the letter's own strokes: only pixels at least COUNTER_WALL_PX
+                # from the shape's outside edge may become the opening
+                outside = ~(mine | spot)
+                wall = cv2.distanceTransform((~outside).astype(np.uint8), cv2.DIST_L2, 3)
+                want = max(1, int(round(COUNTER_OPEN_MM * ppm / 2)))
+                grown = cv2.dilate(spot.astype(np.uint8),
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * want - 1, 2 * want - 1))
+                                   ).astype(bool)
+                opened = (spot | grown) & mine & (wall >= COUNTER_WALL_PX)
+                if opened.sum() >= 2:
+                    out[opened] = BG
+    return out
 
 
 def _nearest(pix: np.ndarray, centers: np.ndarray) -> np.ndarray:
@@ -88,6 +163,24 @@ def _smooth(labels: np.ndarray, sigma: float) -> np.ndarray:
 
 
 GARMENT_DIFFERS = 14.0     # Lab distance beyond which a garment is not the paper's color
+
+
+def _ink_color(rgb: np.ndarray, m: np.ndarray, rgb_w: np.ndarray, labels: np.ndarray,
+               alpha: np.ndarray | None) -> tuple:
+    """The true color of thin strokes (mask m at working size) from the full-size picture:
+    the median of the INK_SHARE of their pixels least like the background."""
+    h, w = rgb.shape[:2]
+    big = cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+    if alpha is not None:
+        big &= alpha >= 128
+    pix = rgb[big].astype(np.float32)
+    if len(pix) < 10:
+        return tuple(int(v) for v in np.median(rgb_w[m], axis=0))
+    bgm = labels == BG
+    bg = (np.median(rgb_w[bgm], axis=0) if bgm.sum() >= 50 else np.array([255.0, 255, 255]))
+    far = np.linalg.norm(pix - bg.astype(np.float32), axis=1)
+    keep = far >= np.quantile(far, 1.0 - INK_SHARE)
+    return tuple(int(v) for v in np.median(pix[keep], axis=0))
 
 
 def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
@@ -219,7 +312,11 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
                 continue
             L, a, b = centers[c]
             darker = any(centers[o][0] < L - 30 for o in alive if o not in (c, bg_id))
-            if L > 65 and math.hypot(a, b) < 15 and area(c) < 0.05 * total and darker:
+            # (not thin lines: small grey lettering shrunk to this scale reads as a pale grey,
+            # but it is text, not soft shading)
+            mask = (cmap == c).astype(np.uint8)
+            thin = 1.0 - cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel).sum() / max(1, mask.sum())
+            if L > 65 and math.hypot(a, b) < 15 and area(c) < 0.05 * total and darker                     and thin < THIN_SHARE:
                 fade(c)
 
     found = {"present": False, "sewn": False}
@@ -310,6 +407,19 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
     for _ in range(2):
         labels = _remove_specks(labels, min_area_px)
 
+    # The counters of small letters (the eye of an e) can close up when the picture is
+    # shrunk: an e then sews as a c. Opened again from the full-size picture.
+    if inside_label is None:
+        lab_full = cv2.cvtColor(rgb.astype(np.float32) / 255.0, cv2.COLOR_RGB2Lab)
+        near = np.array(alive, np.int64)[
+            _nearest(lab_full.reshape(-1, 3), centers[alive].astype(np.float32))].reshape(rgb.shape[:2])
+        full = np.full(rgb.shape[:2], BG, np.uint8)
+        for i, c in enumerate(sewn):
+            full[near == c] = i
+        if alpha is not None:
+            full[alpha < 128] = BG
+        labels = _open_counters(labels, full, len(sewn), ppm, mm_per_src_px)
+
     # Re-number colors by size, biggest first, and take each color from the real pixels.
     ids = [i for i in range(len(sewn)) if (labels == i).any()]
     if not ids:
@@ -323,8 +433,13 @@ def run(intake: dict, fit_w_mm: float, fit_h_mm: float, rules: dict,
         m = labels == old
         out[m] = new
         core = cv2.erode(m.astype(np.uint8), small, iterations=2).astype(bool)
-        src = core if core.sum() >= 50 else m
-        palette.append(tuple(int(v) for v in np.median(rgb_w[src], axis=0)))
+        if core.sum() >= 50 and core.sum() >= SOLID_CORE * m.sum():
+            palette.append(tuple(int(v) for v in np.median(rgb_w[core], axis=0)))
+        else:
+            # thin lines and small lettering: shrunk, their pixels blend with the fabric (dark
+            # grey text came out white). Their color is taken from the original picture,
+            # from the pixels least like the background.
+            palette.append(_ink_color(rgb, m, rgb_w, labels, alpha))
 
     inside_color = ids.index(inside_label) if inside_label in ids else None
     result = {"labels": out, "palette": palette, "ppm": float(ppm), "inside_color": inside_color,

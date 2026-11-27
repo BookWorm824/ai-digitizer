@@ -36,9 +36,10 @@ import numpy as np
 import shapely
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import substring, unary_union
+from shapely.prepared import prep
 from skimage.morphology import skeletonize
 
-from . import aiplan, geometry, lettering, linenet
+from . import aiplan, geometry, lettering, linenet, rings
 from .common import canvas_for, dist, polygons_of, save_debug
 
 SKEL_PPM = 12.0          # resolution used to find centre lines
@@ -48,7 +49,13 @@ MIN_THIN_LENGTH_MM = 3.0 # ...and so are thin bits shorter than this
 FRINGE_MM = 0.6          # thin slivers on the edge of a solid shape are part of that shape
 SATIN_STEP_MM = 0.25     # spacing of the sample points along a satin column's centre line
 SATIN_COVER = 0.8        # columns must cover this share of a shape for it to be sewn as satin
+RING_EVEN_RATIO = 1.6    # a satin ring round a hole may vary this much in width, no more
+COVERED_EDGE_SHARE = 0.8 # a column edge this much under later colors gets no pull comp
+PATCH_MIN_MM2 = 0.8      # a piece of a satin shape the columns miss this big is filled
+PATCH_MIN_WIDTH_MM = 0.5 # ... if it is at least this wide
+PATCH_TUCK_MM = 0.3      # ... reaching this far under the column ends
 SATIN_SPILL = 0.25       # ...and may not spill outside it by more than this share
+CORNER_SHARP_SHARE = 0.7 # ... if most of that turn is within half the distance (a corner)
 CORNER_DEG = 70.0        # a centre line turning this sharply is split into two columns
                          # (Wilcom/Soft Sight: interior angles under ~110 deg are mitred)
 JOIN_STRAIGHT_DEG = 45.0 # at a junction, branches this close to straight are one stroke
@@ -383,9 +390,15 @@ def _split_at_corners(center: np.ndarray, med_half: float) -> list[tuple[int, in
         return [(0, n)]
     head = np.arctan2(*np.gradient(_smooth(center, 3), axis=0).T[::-1])
     turn = np.zeros(n)
+    sharp = np.zeros(n)
+    k2 = max(2, k // 2)
+
+    def bend(i, w):
+        return math.degrees(abs((head[i + w] - head[i - w] + math.pi) % (2 * math.pi) - math.pi))
+
     for i in range(k, n - k):
-        d = math.degrees(abs((head[i + k] - head[i - k] + math.pi) % (2 * math.pi) - math.pi))
-        turn[i] = d
+        turn[i] = bend(i, k)
+        sharp[i] = bend(i, k2)
     cuts = []
     i = k
     while i < n - k:
@@ -393,7 +406,11 @@ def _split_at_corners(center: np.ndarray, med_half: float) -> list[tuple[int, in
             j = i
             while j + 1 < n - k and turn[j + 1] >= turn[j]:
                 j += 1                     # walk to the sharpest point of this bend
-            cuts.append(j)
+            # a corner, not a smooth tight curve (a narrow ring round an ear): most of the
+            # turn happens within half the distance. A ring is one column, or its pieces'
+            # ends fan where they meet.
+            if sharp[max(k, i - k):min(n - k, j + k) + 1].max() >= CORNER_SHARP_SHARE * turn[j]:
+                cuts.append(j)
             i = j + 2 * k
         else:
             i += 1
@@ -475,7 +492,54 @@ def columns(piece: Polygon) -> list[dict]:
             h = np.linalg.norm(left - right, axis=1) / 2
             out.append({"center": c, "half": h, "left": left, "right": right,
                         "outline": column_outline(c, h, left, right)})
-    return out
+    return _end_under_through(out)
+
+
+JOINT_TUCK_MM = 0.3      # a column ending at a joint reaches this far under the through column
+
+
+def _end_under_through(cols: list) -> list:
+    """Where a column ends at a joint that another column runs straight through (branches
+    running on are joined into one column), it stops just under that column's edge instead
+    of reaching its middle: every branch reaching the middle stacks a layer of satin per
+    branch (a knot where a palm's fronds meet). Training session "Line art at left chest":
+    one stroke continuous on top, the rest ending under it, at most two layers at a point."""
+    if len(cols) < 2:
+        return cols
+    lines = [LineString(c["center"]) for c in cols]
+    for k, col in enumerate(cols):
+        c, h = col["center"], col["half"]
+        if len(c) < 6:
+            continue
+        cut = [0, len(c)]
+        for end in (0, -1):
+            P = Point(c[end])
+            best = None
+            for j, other in enumerate(cols):
+                if j == k:
+                    continue
+                d = lines[j].distance(P)
+                oh = float(np.median(other["half"]))
+                ends_far = min(Point(other["center"][0]).distance(P),
+                               Point(other["center"][-1]).distance(P)) > 2.0 * oh
+                if d < 0.5 * oh and ends_far and (best is None or oh > best):
+                    best = oh
+            if best is None:
+                continue
+            back = best - JOINT_TUCK_MM
+            seg = np.linalg.norm(np.diff(c, axis=0), axis=1)
+            run = np.concatenate([[0.0], np.cumsum(seg if end == 0 else seg[::-1])])
+            n = int(np.searchsorted(run, back))
+            if end == 0:
+                cut[0] = max(cut[0], n)
+            else:
+                cut[1] = min(cut[1], len(c) - n)
+        if cut != [0, len(c)] and cut[1] - cut[0] >= 4:
+            a, b = cut
+            col.update(center=c[a:b], half=h[a:b], left=col["left"][a:b],
+                       right=col["right"][a:b])
+            col["outline"] = column_outline(col["center"], col["half"], col["left"], col["right"])
+    return cols
 
 
 def try_satin(piece: Polygon, rules: dict, drop_hairlines: bool = False) -> list[dict] | None:
@@ -504,6 +568,14 @@ def try_satin(piece: Polygon, rules: dict, drop_hairlines: bool = False) -> list
             cols.append(c)
     if not cols:
         return None
+    for c in cols:
+        ring = dist(c["center"][0], c["center"][-1]) < 2 * SATIN_STEP_MM
+        lo, hi = np.percentile(c["half"], [10, 90])
+        if ring and hi > RING_EVEN_RATIO * lo:
+            # a band all the way round a hole that is wide in one place and narrow in
+            # another (a solid badge with a shape cut out of it): satin turning round it
+            # fans and bunches; a fill with the hole in it sews it cleanly
+            return None
     if len(cols) == 1:
         c = cols[0]
         length = float(np.linalg.norm(np.diff(c["center"], axis=0), axis=1).sum())
@@ -517,6 +589,19 @@ def try_satin(piece: Polygon, rules: dict, drop_hairlines: bool = False) -> list
         return None
     if covered < SATIN_COVER * target.area or spill > SATIN_SPILL * piece.area:
         return None
+    # What the columns miss and is big enough to see (the slanted end of a ring cut off by
+    # a shape in front of it, a corner): a small patch of fill under the column ends, or
+    # the fabric shows through there.
+    try:
+        missed = target.difference(cover.buffer(0.05))
+    except Exception:  # noqa: BLE001
+        missed = None
+    patches = []
+    for gap in polygons_of(missed) if missed is not None else []:
+        if gap.area >= PATCH_MIN_MM2 and not gap.buffer(-PATCH_MIN_WIDTH_MM / 2).is_empty:
+            patches.extend(polygons_of(gap.buffer(PATCH_TUCK_MM).intersection(piece)))
+    if patches:
+        cols[0] = dict(cols[0], patches=patches)
     return cols
 
 
@@ -640,6 +725,47 @@ def underlap(layers: list, order: list[int], overlap: float) -> dict:
     return out
 
 
+SEW_ON_TOP_STROKE_MM = 1.5      # holes for later details thinner than this are not cut
+SEW_ON_TOP_COVER = 0.85         # ... when later colors cover at least this share of the hole
+
+
+def sew_on_top(shapes: dict, layers: list, order: list[int]) -> dict:
+    """Close the holes a fill has for small, thin details sewn after it (small lettering, a
+    thin outline drawn inside a colored area): the fill runs on unbroken and the detail is
+    sewn on top. Cut out, such holes split the fill into many small sections with cuts and
+    travel between them, and the slightest shift on the fabric opens a gap between the
+    letters and the ground; pros knock out only lettering with strokes clearly over a
+    millimetre (Hatch / Wilcom knockout guides, Ink/Stitch forum on text over fills).
+    Pieces of the same color inside a closed hole (the counter of an O) join the fill."""
+    by_color = {layer["color"]: layer["polys"] for layer in layers}
+    out = dict(shapes)
+    for k, color in enumerate(order):
+        after = [p for c in order[k + 1:] for p in by_color.get(c, [])]
+        if not after:
+            continue
+        later = unary_union(after)
+        grown, closed = [], []
+        for p in out[color]:
+            keep = []
+            for ring in p.interiors:
+                hole = Polygon(ring)
+                if hole.area < 0.05:
+                    keep.append(ring)
+                    continue
+                covered = hole.intersection(later).area / hole.area
+                stroke = 2.0 * hole.area / max(hole.length, 1e-6)
+                if covered >= SEW_ON_TOP_COVER and stroke < SEW_ON_TOP_STROKE_MM:
+                    closed.append(hole)
+                else:
+                    keep.append(ring)
+            grown.append(p if len(keep) == len(p.interiors) else Polygon(p.exterior, keep))
+        if closed:
+            shut = unary_union(closed).buffer(0.05)
+            grown = [p for p in grown if not shut.contains(p)]
+        out[color] = grown
+    return out
+
+
 def _line_width(seg: np.ndarray, piece) -> float:
     """How wide a line of a web was drawn: the typical length of the cut straight across it
     through the drawn shape, measured away from its ends (junctions are fatter). Measuring
@@ -674,7 +800,7 @@ def _line_width(seg: np.ndarray, piece) -> float:
 
 
 def _web_weights(route: list, piece, least: float, bold: float,
-                 axis: float | None = None, drawn: float | None = None) -> list | None:
+                 axis: float | None = None, drawn: float | None = None, detail_runs: bool = True) -> list | None:
     """Line weights for a web of outlines, or None if it is thin line work (running stitch).
     A web has one weight, its typical drawn width, so every wall is the same thickness (a
     line here and there measuring a little over or under must not come out bold beside
@@ -687,6 +813,14 @@ def _web_weights(route: list, piece, least: float, bold: float,
     if drawn:
         # a drawing redrawn for its size (simplify.py): every line was drawn this wide
         out = [max(drawn, least) if w >= 0.35 * drawn else 0.0 for w in widths]
+        if drawn >= DETAIL_RUN_FROM_MM and detail_runs:
+            # a detailed drawing kept whole at a bigger size (not rebuilt): its short
+            # detail lines (window frames and bars, bricks) are runs, only the structure
+            # is satin; satin on every little line crowds and piles up at the joins
+            # (training session "Line art at left chest": three weights by role, small
+            # detail never satin)
+            out = [0.0 if LineString(seg).length < DETAIL_LEN_MM else v
+                   for seg, v in zip(route, out)]
         return _uncrowd(route, out)
     twins = _twins(route, axis)
     for k, t in twins.items():                      # the two sides measure alike
@@ -808,7 +942,7 @@ def _round_openings(piece: Polygon) -> list:
         if hole.area <= 0:
             continue
         r = math.sqrt(hole.area / math.pi)
-        if not 0.8 <= r <= 15.0:
+        if not 0.8 <= r <= ROUND_MAX_R_MM:
             continue
         if 4.0 * math.pi * hole.area / max(hole.length ** 2, 1e-9) < 0.86:
             continue
@@ -821,19 +955,30 @@ def _round_openings(piece: Polygon) -> list:
 
 
 def _web_blobs(poly: Polygon) -> list:
-    """Solid masses in a web of thin outlines: parts at least four line-widths across (and
-    at least 3 mm), e.g. a tree drawn touching a building. Empty for an ordinary web."""
+    """Solid masses in a web of thin outlines: parts at least BLOB_WIDTHS line-widths across
+    (and at least BLOB_MIN_MM), e.g. a tree drawn touching a building, or a letter of a
+    monogram overlapping its ring. A web's own junctions are only about 1.4 line-widths
+    thick, so they never count. Empty for an ordinary web."""
     if len(poly.interiors) < NETWORK_HOLES:
         return []
     tw = typical_width(poly)
-    r = max(1.5, 2.0 * tw)
+    r = max(BLOB_MIN_MM / 2.0, BLOB_WIDTHS / 2.0 * tw)
     core = poly.buffer(-r, quad_segs=4)
     if core.is_empty:
         return []
     blobs = core.buffer(r * 1.05, quad_segs=4).intersection(poly)
-    return [b for b in polygons_of(blobs.buffer(0)) if b.area >= 12.0]
+    return [b for b in polygons_of(blobs.buffer(0)) if b.area >= BLOB_MIN_MM2]
 
 
+SPECK_MM = 1.6          # a mark no bigger across than this...
+SPECK_INSIDE_MM = 3.0   # ...and no stitching around it within this distance
+SPECK_CLEAR_MM = 1.0    # ...with nothing else within this distance is a speck, not design
+SCRAP_REACH = 15.0      # a left-out line's stray bits are looked for this many heights away
+ROUND_MAX_R_MM = 150.0  # round openings up to this radius get a true circle (a badge ring
+                        # 40 mm across was sewn as a polygon of flat sides)
+BLOB_WIDTHS = 3.0       # a part this many line-widths thick inside a web is a solid mass...
+BLOB_MIN_MM = 2.0       # ...and at least this thick...
+BLOB_MIN_MM2 = 6.0     # ...and this big
 FRAME_MIN_MM2 = 150.0   # a shape this big can be a frame (a building) that holds other shapes
 
 FRAME_ROW_MAX = 5          # only a short row inside a big outline is taken for part of it
@@ -982,6 +1127,28 @@ def _ground(shapes: dict, inside: int, skip: set, reach: float) -> list:
     return [p for p in polygons_of(merged.buffer(0)) if p.area >= 4.0]
 
 
+def _row_scraps(shapes: dict, info: dict, keys: list, done: set) -> set:
+    """Small shapes of a row's color lying within the row's band: pieces of its letters."""
+    color = keys[0][0]
+    glyphs = [shapes[c][i] for c, i in keys]
+    x0 = min(g.bounds[0] for g in glyphs)
+    x1 = max(g.bounds[2] for g in glyphs)
+    y0 = min(g.bounds[1] for g in glyphs)
+    y1 = max(g.bounds[3] for g in glyphs)
+    h = max(y1 - y0, 1e-6)
+    # (well beyond the row's ends: the rest of the line, a phone number beside a web
+    # address, can lie away from the letters that formed the row)
+    band = box(x0 - SCRAP_REACH * h, y0 - 0.3 * h, x1 + SCRAP_REACH * h, y1 + 0.3 * h)
+    big = 3.0 * float(np.median([g.area for g in glyphs]))
+    out = set()
+    for i, poly in enumerate(shapes.get(color, [])):
+        if (color, i) in done or poly.area > big:
+            continue
+        if band.contains(poly.centroid) and poly.bounds[3] - poly.bounds[1] < 1.6 * h:
+            out.add((color, i))
+    return out
+
+
 def _cover_text_scraps(objects: list, shapes: dict, done: set, fits: dict) -> None:
     """Pieces of traced letters that never joined their row (a merged "BI", the dot of a
     small "i") would be sewn as solid blobs over the retyped words. A leftover shape of the
@@ -1012,6 +1179,7 @@ def _cover_text_scraps(objects: list, shapes: dict, done: set, fits: dict) -> No
                 done.add((color, i))
 
 
+LINE_GAP_HEIGHTS = 4.5   # pieces of one line of text lie within this many letter heights
 PART_WHOLE_SHARE = 0.75   # a piece with this share of its word's letters stands for the word
 
 
@@ -1075,8 +1243,8 @@ def _whole_lines(fits: dict, row_info: list, text: list[str]) -> set:
                 ob = unary_union(other["glyphs"]).bounds
                 if abs((ob[1] + ob[3]) / 2 - cy) > 0.5 * h:
                     continue
-                if max(ob[0] - box[2], box[0] - ob[2]) > 3.0 * h:
-                    continue
+                if max(ob[0] - box[2], box[0] - ob[2]) > LINE_GAP_HEIGHTS * h:
+                    continue          # (" - " separators leave gaps of several letters)
                 box = [min(box[0], ob[0]), min(box[1], ob[1]),
                        max(box[2], ob[2]), max(box[3], ob[3])]
                 members.append(r2)
@@ -1136,6 +1304,19 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         order.remove(vec["inside_color"])
         order.insert(0, vec["inside_color"])
     shapes = underlap(vec["layers"], order, rules["overlap_mm"])
+    shapes = sew_on_top(shapes, vec["layers"], order)
+    _b = vec.get("bounds") or unary_union([q for layer in vec["layers"] for q in layer["polys"]]).bounds
+    design_mm = max(_b[2] - _b[0], _b[3] - _b[1])
+    # rings and round borders: their own objects, sewn after what crosses them (rings.py)
+    ring_objects = []
+    for color in order:
+        found = rings.find_rings(shapes.get(color, []))
+        if found:
+            shapes[color] = rings.split(shapes[color], found)
+            # (rings follow the line rules: drawn bold, a satin at least the narrowest
+            # net satin; finer, a run. Training: satin borders 1-1.2 mm at the least)
+            ring_objects += rings.objects(found, color, rules.get("satin_net_min_mm", 1.1),
+                                          rules.get("line_bold_mm", 0.8))
     # colors that draw lines (a web of outlines somewhere in them): their narrow parts are
     # lines. In any other color a narrow part is a solid shape that happens to be small.
     line_colors = {c for c, polys in shapes.items()
@@ -1159,11 +1340,37 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
 
     objects, dropped = [], 0
 
+    later_of: dict = {}
+
+    def under_later(color, rail) -> bool:
+        """Does this edge of a column lie under colors sewn after it (an outline drawn over
+        it)? Pull compensation there only pushes the edge out past the outline."""
+        if rail is None or color not in order:
+            return False
+        if color not in later_of:
+            k = order.index(color)
+            after = [q for layer in vec["layers"] if layer["color"] in order[k + 1:]
+                     for q in layer["polys"]]
+            later_of[color] = prep(unary_union(after).buffer(0.15)) if after else None
+        cover = later_of[color]
+        if cover is None:
+            return False
+        pts = np.asarray(rail)[:: max(1, len(rail) // 40)]
+        inside = sum(1 for x, y in pts if cover.contains(Point(float(x), float(y))))
+        return inside >= COVERED_EDGE_SHARE * len(pts)
+
     def add_satin(cols, color, style=None):
         for c in cols:
+            for patch in c.get("patches", ()):
+                objects.append({"kind": "fill", "color": color, "poly": patch,
+                                "area_mm2": float(patch.area), "patch": True})
             o = {"kind": "satin", "color": color, "center": c["center"], "half": c["half"],
                  "left": c.get("left"), "right": c.get("right"), "outline": c["outline"],
                  "width_mm": 2 * float(np.median(c["half"])), "area_mm2": float(c["outline"].area)}
+            if under_later(color, c.get("left")):
+                o["comp_left"] = 0.0
+            if under_later(color, c.get("right")):
+                o["comp_right"] = 0.0
             if style:
                 o.update(style)
             objects.append(o)
@@ -1204,6 +1411,22 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
         """Line art: the centre lines as one clean network, straightened and lined up, sewn
         as one continuous thread with two passes on every line (linenet.py). Returns False
         if there was nothing worth sewing."""
+        # An outline drawn round shapes of other colors (a colored letter's border) is the
+        # heaviest line of a design: from about half a millimetre drawn it is a satin at the
+        # narrowest satin width, covering the fill's edge; as a single running line the fill
+        # shows past it (training session "Line art at left chest": outer outlines satin
+        # 1-1.5 mm)
+        bold_from = rules["line_bold_mm"]
+        hull = Polygon(piece.exterior)
+        inside_other = sum(q.intersection(hull).area for c2, qs in shapes.items() if c2 != color
+                           for q in qs if q.intersects(hull))
+        # (an outer outline only: a line inside another color's shape, the muzzle line in a
+        # bear's face, is an inner line and keeps the lighter weight of the drawing)
+        held = sum(Polygon(q.exterior).intersection(piece).area for c2, qs in shapes.items()
+                   if c2 != color for q in qs if q.intersects(piece))
+        outlines_others = inside_other > OUTLINE_FILLS_SHARE * max(hull.area - piece.area, 1e-9)
+        if outlines_others and held < OUTLINE_INNER_SHARE * piece.area:
+            bold_from = min(bold_from, OUTLINE_BOLD_MM)
         sk = _skeleton(piece, prune_hairlines=False)
         if sk is None:
             return False
@@ -1234,26 +1457,29 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                  "width_mm": width, "bean": False, "bold": bool(bold)}
             if use_satin and not rules.get("knockdown", False):
                 weights = _web_weights(route, piece, rules.get("satin_net_min_mm", 1.1),
-                                       rules["line_bold_mm"], net.get("axis"),
-                                       rules.get("drawn_line_mm"))
+                                       bold_from, net.get("axis"),
+                                       rules.get("drawn_line_mm"),
+                                       detail_runs=design_mm <= DETAIL_RUNS_MAX_MM)
                 if weights:
                     o["satin_w"] = weights
             objects.append(o)
         return True
 
-    def sew_narrow(part, color, alone=True):
+    def sew_narrow(part, color, alone=True, blobs_done=False):
         """A part that is narrow all over: satin if it is a real column, bean lines if it is
         thin or a web of outlines, otherwise a fill."""
         nonlocal dropped
-        blobs = _web_blobs(part)
+        blobs = [] if blobs_done else _web_blobs(part)
         if blobs:
-            # a web of outlines with solid masses joined to it (a tree touching a building):
-            # the masses are filled, the outlines around them sewn on their own
+            # a web of outlines with solid masses joined to it (a tree touching a building, a
+            # monogram letter over its ring): the masses are filled, the outlines around them
+            # sewn on their own (every piece of them: a piece that still looked like it held
+            # a mass used to be skipped, and a building lost its lines)
             for b in blobs:
                 add_fill(b, color)
             for rest in polygons_of(part.difference(unary_union(blobs).buffer(0.05))):
-                if rest.area >= min_area and not _web_blobs(rest):
-                    sew_narrow(rest, color)
+                if rest.area >= min_area:
+                    sew_narrow(rest, color, alone, blobs_done=True)
             return
         dot = (_dot(part, rules["satin_max_mm"]) or _block(part)) if use_satin else None
         if dot:
@@ -1518,6 +1744,14 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
             add_fill(part, inside)
         done.update((inside, i) for i in range(len(shapes[inside]))
                     if (inside, i) not in lettering_keys)
+    # lines too small to sew are left out with the bits of them that didn't join their row
+    # (a broken "5", a dash): sewn alone they are stray marks where the line was
+    for info in row_info:
+        if info["height"] < rules.get("drop_text_mm", 0.0) and not info.get("not_text")                 and text and lettering.fit_row(info["glyphs"], text, "block",
+                                               rules["satin_max_mm"], parts=True):
+            # (only rows that really are some of the words: rows of small windows or
+            # stonework in a drawing are not lettering, and their neighbours are lines)
+            done.update(_row_scraps(shapes, info, row_keys[info["row"]], done))
     for info in row_info:
         row, height = info["row"], info["height"]
         keys = row_keys[row]
@@ -1538,10 +1772,18 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
                                              lettering.text_style(pls[0].H), group=row, row=row))
             done.update(keys)
             continue
+        if all(k in done for k in keys):
+            continue                   # every piece is a scrap of a line left out
         trace_row(row, keys, height)
         for o in objects[start:]:
             o["text_row"] = row
     _cover_text_scraps(objects, shapes, done, fits)
+
+    # ---- monograms: a tall centre letter with smaller side letters (rings.py took any
+    # ring out first). Not a word row (heights differ) and the letters often merge.
+    mono, mono_keys = _monogram(shapes, done, text, order, rules)
+    objects.extend(mono)
+    done.update(mono_keys)
 
     # ---- everything else
     for color in order:
@@ -1599,8 +1841,11 @@ def run(vec: dict, rules: dict, debug_dir: Path | None = None,
 
     bounds = vec.get("bounds") or unary_union(
         [q for layer in vec["layers"] for q in layer["polys"]]).bounds
+    objects.extend(ring_objects)
+    dropped += _drop_specks(objects)
     _match_mirrors(objects, bounds)
     _match_mirror_lines(objects, bounds, rules.get("satin_net_min_mm", 1.1))
+    _same_weight_rows(objects)
     _fit_fills_to_lines(objects)
 
     if debug_dir is not None and objects:
@@ -1653,6 +1898,241 @@ def _match_mirrors(objects: list, bounds) -> None:
             break
 
 
+def _drop_specks(objects: list) -> int:
+    """Very short marks standing alone (bits of lettering too small to sew, left after the
+    line was dropped) are not part of the design: a short line that belongs to a drawing (a
+    clock hand) sits beside other stitching. Removed in place; returns how many."""
+    from shapely.strtree import STRtree           # noqa: PLC0415
+
+    def geom(o):
+        if o["kind"] == "run":
+            return o["line"]
+        return o.get("outline") if o["kind"] == "satin" else o.get("poly")
+    gs = [geom(o) for o in objects]
+    idx = [k for k, g in enumerate(gs) if g is not None]
+    if len(idx) < 2:
+        return 0
+    tree = STRtree([gs[k] for k in idx])
+    small = set()
+    for k, o in enumerate(objects):
+        if o["kind"] != "run" or o.get("seq") is not None or o.get("route") is None and                 o.get("text_row") is not None:
+            continue
+        g = gs[k]
+        if g is None:
+            continue
+        x0, y0, x1, y1 = g.bounds         # (its size, not its path: tours go out and back)
+        if max(x1 - x0, y1 - y0) < SPECK_MM:
+            small.add(k)
+    drop = set()
+    for k in small:
+        g = gs[k]
+        near = [idx[i] for i in tree.query(g.buffer(SPECK_CLEAR_MM))]
+        # (beside real stitching it is part of something; beside other specks it is not)
+        if any(j != k and j not in small and gs[j].distance(g) < SPECK_CLEAR_MM for j in near):
+            continue
+        # (inside other stitching, the hands of a clock inside its ring, it is a detail)
+        c = g.centroid
+        around = [idx[i] for i in tree.query(g.buffer(SPECK_INSIDE_MM))]
+        if any(j != k and j not in small and gs[j].convex_hull.contains(c) for j in around):
+            continue
+        drop.add(k)
+    for k in sorted(drop, reverse=True):
+        del objects[k]
+    return len(drop)
+
+
+ROW_SIDE_OVERLAP = 0.35  # pieces overlapping sideways more than this share are not a row
+OUTLINE_BOLD_MM = 0.5     # a line outlining other colors is satin from this drawn width
+OUTLINE_INNER_SHARE = 0.6 # ... unless this much of the line lies inside another color's shape
+OUTLINE_FILLS_SHARE = 0.5 # ... when other colors fill this share of what it encloses
+DETAIL_LEN_MM = 3.0       # in a detailed drawing, lines shorter than this are runs...
+DETAIL_RUNS_MAX_MM = 120.0 # ... on designs up to about 4.7 in (on a full back they are satin)
+DETAIL_RUN_FROM_MM = 0.95 # ... when it was redrawn whole (lines this wide), not rebuilt
+SAME_WEIGHT_TOL = 0.3    # lines drawn within this share of each other's width are "alike"
+
+
+def _same_weight_rows(objects: list) -> None:
+    """Strokes drawn alike, side by side in a row (the letters of a word traced as line
+    art, script lettering at cap size), are sewn alike. A letter with a closed bowl (a B)
+    is a web of lines and can come out as satin while the open strokes beside it stay
+    running stitch: one heavy letter in a thin word. The row is sewn the way that covers
+    most of its length."""
+    lines = [k for k, o in enumerate(objects) if o["kind"] == "run" and o.get("route")
+             and o.get("seq") is None and o.get("width_mm") and not o.get("ring")]
+    parent = {k: k for k in lines}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in lines:
+        a = objects[i]
+        ax0, ay0, ax1, ay1 = a["line"].bounds
+        for j in lines:
+            if j <= i or objects[j]["color"] != a["color"]:
+                continue
+            b = objects[j]
+            bx0, by0, bx1, by1 = b["line"].bounds
+            h = min(ay1 - ay0, by1 - by0)
+            if h <= 0.5:
+                continue
+            over = min(ay1, by1) - max(ay0, by0)
+            gap = max(bx0 - ax1, ax0 - bx1)
+            side = min(ax1 - ax0, bx1 - bx0)
+            if -gap > ROW_SIDE_OVERLAP * max(side, 0.1):
+                continue        # one inside the other (a mouth in a muzzle): not a row
+            wa, wb = a["width_mm"], b["width_mm"]
+            alike = abs(wa - wb) <= SAME_WEIGHT_TOL * max(wa, wb)
+            if over >= 0.6 * h and gap <= max(ay1 - ay0, by1 - by0) and alike:
+                parent[find(i)] = find(j)
+    groups: dict = {}
+    for k in lines:
+        groups.setdefault(find(k), []).append(k)
+    for ks in groups.values():
+        if len(ks) < 2:
+            continue
+        sat = [k for k in ks if objects[k].get("satin_w")]
+        if not sat or len(sat) == len(ks):
+            continue
+        sat_len = sum(objects[k]["line"].length for k in sat)
+        all_len = sum(objects[k]["line"].length for k in ks)
+        widths = [v for k in sat for v in objects[k]["satin_w"] if v > 0]
+        if sat_len * 2 >= all_len and widths:
+            w = float(np.median(widths))
+            for k in ks:
+                if not objects[k].get("satin_w"):
+                    objects[k]["satin_w"] = [w] * len(objects[k]["route"])
+        else:
+            for k in sat:
+                objects[k].pop("satin_w", None)
+                objects[k]["bold"] = True
+
+
+MONO_SIDE = (0.4, 0.8)    # side letters of a monogram are this share of the centre's height
+MONO_MIN_IOU = 0.55       # retyped monogram letters must cover the art this well
+MONO_FILL = 0.2           # a letter covers at least this share of its box (a ring doesn't)
+MONO_MIN_H_MM = 5.0       # monograms smaller than this are left as drawn
+
+
+def _monogram_tokens(text: list[str] | None) -> list[str]:
+    """Monograms in the known words: two or three capitals written together (JMR) or
+    apart (J M R)."""
+    out = []
+    for line in text or []:
+        compact = re.sub(r"[\s.]+", "", line.strip())
+        letters = lettering.letters_of(compact)
+        if 2 <= len(letters) <= 3 and len(letters) == len(compact) and compact.isupper():
+            out.append(compact)
+    return list(dict.fromkeys(out))
+
+
+def _monogram(shapes: dict, done: set, text, order: list, rules: dict):
+    """Monogram letters retyped one by one (training session "Monogram letters": Erich
+    Campbell Takeup ep. 126, Wilcom monogram help). A monogram is one tall centre letter
+    with side letters about half its height, centred on it; merged letters (a side letter
+    overlapping the centre one) are split by fitting each letter at its own size and place.
+    Kept only if the letters together cover the traced shapes closely. The centre letter is
+    sewn first and the side letters over it."""
+    tokens = _monogram_tokens(text)
+    if not tokens:
+        return [], set()
+    for color in order:
+        pieces = [(i, p) for i, p in enumerate(shapes.get(color, []))
+                  if (color, i) not in done and p.area > 1.0]
+        # (not a frame, ring or arc: a letter fills a fair share of its box)
+        solid = [(i, p) for i, p in pieces
+                 if p.area > MONO_FILL * (p.bounds[2] - p.bounds[0]) * (p.bounds[3] - p.bounds[1])]
+        if not solid:
+            continue
+        tall_i, tall = max(solid, key=lambda ip: ip[1].bounds[3] - ip[1].bounds[1])
+        tx0, ty0, tx1, ty1 = tall.bounds
+        Ht = ty1 - ty0
+        if Ht < MONO_MIN_H_MM:
+            continue
+        # the letters: big pieces level with the tall one and near it
+        group = [(i, p) for i, p in solid
+                 if p.bounds[1] < ty1 and p.bounds[3] > ty0
+                 and p.bounds[0] > tx0 - 2.5 * Ht and p.bounds[2] < tx1 + 2.5 * Ht
+                 and p.bounds[3] - p.bounds[1] > 0.3 * Ht]
+        art = unary_union([p for _i, p in group])
+        ux0, _uy0, ux1, _uy1 = art.bounds
+        side_hs = sorted({round(p.bounds[3] - p.bounds[1], 2) for _i, p in group
+                          if MONO_SIDE[0] * Ht <= p.bounds[3] - p.bounds[1] <= MONO_SIDE[1] * Ht})
+        side_hs = side_hs or [0.5 * Ht, 0.6 * Ht, 0.7 * Ht]
+        w0 = float(np.median([lettering.stroke_width(p) for _i, p in group]))
+        style = "varsity" if lettering.has_serifs([p for _i, p in group]) else "block"
+        best = None
+        for tok in tokens:
+            chars = lettering.letters_of(tok)
+            mid = len(chars) // 2 if len(chars) == 3 else None
+            for hs in side_hs:
+                for align in ("middle", "bottom", "top"):
+                    pls = _monogram_place(chars, mid, Ht, hs, (ux0, ty0, ux1, ty1), w0, style,
+                                          align, rules)
+                    if not pls:
+                        continue
+                    ours = unary_union([lettering.outline_of(pl, style) for pl in pls])
+                    try:
+                        iou = ours.intersection(art).area / max(ours.union(art).area, 1e-9)
+                    except Exception:  # noqa: BLE001 - odd geometry: not this one
+                        continue
+                    if best is None or iou > best[0]:
+                        best = (iou, tok, pls, mid)
+        if best is None or best[0] < MONO_MIN_IOU:
+            continue
+        iou, tok, pls, mid = best
+        cover = unary_union([lettering.outline_of(pl, style) for pl in pls]).buffer(0.6)
+        keys = {(color, i) for i, _p in group}
+        keys |= {(color, i) for i, p in pieces
+                 if (color, i) not in keys and p.intersection(cover).area > 0.5 * p.area}
+        # sewing order: the centre letter first, the side letters over it
+        order_idx = ([mid] if mid is not None else []) + [k for k in range(len(pls)) if k != mid]
+        out = []
+        for li, k in enumerate(order_idx):
+            pl = pls[k]
+            for o in lettering.objects([pl], color, rules, style, lettering.text_style(pl.H),
+                                       group=MONO_GROUP + color, row=None):
+                o["seq"] = (MONO_GROUP + color, li, o["seq"][2])
+                out.append(o)
+        return out, keys
+    return [], set()
+
+
+MONO_GROUP = 9000              # lettering group numbers used for monogram letters
+
+
+def _monogram_place(chars, mid, Ht, hs, box, w0, style, align, rules):
+    """Placements for monogram letters across `box` (x0, y0, x1, y1 of the centre letter's
+    height): side letters at the outer edges, the centre letter centred."""
+    x0, y0, x1, y1 = box
+    ymid = (y0 + y1) / 2.0
+    pls = []
+    for k, ch in enumerate(chars):
+        H = Ht if k == mid else hs
+        w = lettering.width_for(H, style, weight_mm=w0, satin_max=rules.get("satin_max_mm", 7.0))
+        pl = lettering.Placement(ch, 0.0, 0.0, H, w)
+        if align == "middle":
+            by = ymid + H / 2.0
+        elif align == "bottom":
+            by = y1
+        else:
+            by = y0 + H
+        pl.by = by
+        lo, hi = lettering.extent(pl, style)
+        if mid is None:
+            pl.bx = (x0 - lo) if k == 0 else (x1 - hi)
+        elif k == 0:
+            pl.bx = x0 - lo
+        elif k == len(chars) - 1:
+            pl.bx = x1 - hi
+        else:
+            pl.bx = (x0 + x1) / 2.0 - (lo + hi) / 2.0
+        pls.append(pl)
+    return pls
+
+
 def _match_mirror_lines(objects: list, bounds, satin_from: float) -> None:
     """Lines on the two sides of a design drawn alike (the rules either side of a dot) are
     sewn alike. Measured separately, one can come out a hair over the satin width and the
@@ -1662,7 +2142,7 @@ def _match_mirror_lines(objects: list, bounds, satin_from: float) -> None:
     cx = (minx + maxx) / 2
     span = max(maxx - minx, 1e-6)
     lines = [k for k, o in enumerate(objects) if o["kind"] == "run" and o.get("route")
-             and o.get("seq") is None and o.get("text_row") is None]
+             and o.get("seq") is None and o.get("text_row") is None and not o.get("ring")]
     used = set()
     for i in lines:
         if i in used:

@@ -30,13 +30,16 @@ from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
 from .common import dist
+from .stitch import Cut
 
 ALWAYS_JOIN_MM = 1.0       # a hop this short is no more visible than an ordinary stitch
 BLOCK_OPEN_MM = 0.4        # ... but beside small blocks only this much: the gap is the design
 OTHER_COLOR_MARGIN_MM = 0.3  # thread under another color stays this far inside its edges
+THIN_COVER_TRIM_MM = 0.25  # a thin line's shape (line + 0.4 mm) less this is what it hides
 COVER_PAD_MM = 0.15        # stitching hides thread this far past its own edge (thread spread)
 ROUTE_MAX_MM = 30.0        # hidden travel is looked for on hops up to this long
 ROUTE_PAD_MM = 6.0         # ...within this much room around the straight line
+LETTER_OPEN_SHARE = 0.18   # a letter connector's open part is at most this share of its height
 ROUTE_CELL_MM = 0.3        # grid used to find it
 ROUTE_OPEN_MM = 1.5        # at most this much of it may lie on open ground: the connector
                            # between two satin letters at their closest points (digitizing
@@ -97,6 +100,29 @@ def _extent(o: dict) -> tuple:
     xs = [p[0] for sg in o["segments"] for p in sg]
     ys = [p[1] for sg in o["segments"] for p in sg]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _late_outlines(objects: list, colors: list, any_order: bool = False) -> dict:
+    """Outlines (line work) that surround solid stitching of a color sewn after their own:
+    {id: object}. A ring of gold around navy numbers, when gold is sewn first because of
+    other gold letters, would end up under the navy."""
+    from shapely.geometry import Polygon          # noqa: PLC0415
+    turn = {c: i for i, c in enumerate(colors)}
+    solids = [o for o in objects if o["kind"] in ("fill", "satin") and o.get("shape") is not None]
+    out = {}
+    for o in objects:
+        if o["kind"] != "run" or o.get("shape") is None or o.get("seq") is not None:
+            continue
+        geoms = getattr(o["shape"], "geoms", [o["shape"]])
+        rings = [Polygon(g.exterior) for g in geoms if g.geom_type == "Polygon"]
+        if not rings:
+            continue
+        inside = [q for q in solids if q["color"] != o["color"]
+                  and (any_order or turn.get(q["color"], 0) > turn.get(o["color"], 0))
+                  and any(r.contains(q["shape"].representative_point()) for r in rings)]
+        if inside and sum(q["shape"].area for q in inside) >= 0.2 * sum(r.area for r in rings):
+            out[id(o)] = o
+    return out
 
 
 def _centre_out(lettered: list, cx: float) -> list:
@@ -169,6 +195,15 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         d["solid"] += o["kind"] != "run"
     rank = {c: i for i, c in enumerate(order or [])}
     colors = sorted(info, key=lambda c: (info[c]["solid"] == 0, rank.get(c, 0), -info[c]["area"]))
+    # An outline sews after what it surrounds (letter first, outline second). When a design
+    # has both gold letters outlined in navy and navy numbers outlined in gold, one turn per
+    # color can't do both: such an outline gets a second turn of its color at the end.
+    # (on caps parts are sewn band by band from the centre, so an outline spanning a word
+    # can be sewn before letters of a color that comes earlier: there any surrounding
+    # outline goes last)
+    late = _late_outlines(objects, colors, any_order=bool(rules.get("cap_mode")))
+    if late:
+        objects = [o for o in objects if id(o) not in late]
 
     # ---- groups: normally everything at once; for hats, bands from the centre outward
     if rules.get("cap_mode") and objects:
@@ -212,7 +247,8 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
     for group, color in passes:
         segs: list = []
         for kind in KIND_ORDER:
-            mine = [o for o in group if o["color"] == color and o["kind"] == kind]
+            mine = [o for o in group if o["color"] == color and o["kind"] == kind
+                    and not o.get("sew_last")]
             # lettering is sewn in its own order: letter by letter, left to right, each
             # letter's strokes as the font planned them (research rule 36)
             lettered = sorted((o for o in mine if o.get("seq") is not None),
@@ -237,12 +273,27 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                 pos = o["segments"][-1][-1]
             part, pos = _nearest_first([o for o in mine if o.get("seq") is None], pos)
             segs.extend(part)
+        # rings and round borders: after everything of their color that crosses them, in
+        # the same turn of the color (no extra color change)
+        part, pos = _nearest_first([o for o in group if o["color"] == color
+                                    and o.get("sew_last")], pos)
+        segs.extend(part)
         if not segs:
             continue
         if raw_blocks and raw_blocks[-1][0] == color:
             raw_blocks[-1][1].extend(segs)
         else:
             raw_blocks.append([color, segs])
+    if late:
+        for color in colors:
+            mine = [o for o in late.values() if o["color"] == color]
+            if not mine:
+                continue
+            part, pos = _nearest_first(mine, pos)
+            if raw_blocks and raw_blocks[-1][0] == color:
+                raw_blocks[-1][1].extend(part)
+            else:
+                raw_blocks.append([color, part])
 
     blocks = []
     for o in base:
@@ -260,19 +311,27 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                          o.get("seq") is not None
                          or (o.get("text_row") is not None and o["kind"] in ("satin", "fill")))}
     block_shapes = {id(o["shape"]) for o in objects if o.get("block") and o.get("shape") is not None}
+    text_h = {id(o["shape"]): o["text_h"] for o in objects
+              if o.get("text_h") and o.get("shape") is not None}
     order_shapes, order_colors, order_thin, order_letter, order_of = [], [], [], [], {}
-    order_block, order_inner = [], []
+    order_block, order_inner, order_ids, order_h = [], [], [], []
     for n, (color_n, raw_segments) in enumerate(raw_blocks):
         for j, (_sg, shape) in enumerate(raw_segments):
             order_of[(n, j)] = len(order_shapes)
-            order_shapes.append(shape.buffer(COVER_PAD_MM) if shape is not None else None)
+            # (a running-stitch line hides only what lies right along it: its shape is
+            # the line grown 0.4 mm, so it is taken back to about a thread's width; a
+            # walk beside a thin letter is on open fabric)
+            pad = -THIN_COVER_TRIM_MM if id(shape) in thin_shapes else COVER_PAD_MM
+            order_shapes.append(shape.buffer(pad) if shape is not None else None)
             # (another color hides thread only well inside its edges: travel along the edge
             # of a black outline peeks out beside it)
             order_inner.append(shape.buffer(-OTHER_COLOR_MARGIN_MM) if shape is not None else None)
             order_colors.append(color_n)
             order_thin.append(id(shape) in thin_shapes)
             order_letter.append(id(shape) in letter_shapes)
+            order_h.append(text_h.get(id(shape)))
             order_block.append(id(shape) in block_shapes)
+            order_ids.append(id(shape) if shape is not None else None)
     indexed = [(k, g) for k, g in enumerate(order_shapes) if g is not None]
     tree = STRtree([g for _, g in indexed]) if indexed else None
 
@@ -282,15 +341,17 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         r, g, b = palette[c]
         return 0.299 * r + 0.587 * g + 0.114 * b
 
-    def covers(k, color, line):
+    def covers(k, color, line, skip=None):
         if tree is None:
             return []
         near = [indexed[i] for i in tree.query(line)]
         # same color: any later stitching hides it (even a line sewn along the same path);
-        # another color: only solid stitching that is not lighter, well inside its edges
+        # another color: only solid stitching that is not lighter, well inside its edges.
+        # (`skip`: a part already partly sewn, whose outline says nothing of where its
+        # remaining pieces lie)
         out = []
         for kk, g in near:
-            if kk < k:
+            if kk < k or (skip is not None and order_ids[kk] == skip):
                 continue
             if order_colors[kk] == color:
                 out.append(g)
@@ -300,11 +361,11 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
                     out.append(inner)
         return out
 
-    def hidden_by_later(line, k, color):
-        later = covers(k, color, line)
+    def hidden_by_later(line, k, color, skip=None):
+        later = covers(k, color, line, skip)
         return bool(later) and unary_union(later).contains(line)
 
-    def hidden_route(p, q, k, color):
+    def hidden_route(p, q, k, color, skip=None):
         """A travel path from p to q that stays under stitching sewn later (Ink/Stitch's
         "underpath" idea, our own code): the cheapest route on a fine grid where covered
         ground is cheap and open ground very dear. Accepted only if at most 1 mm of it is
@@ -313,7 +374,7 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         if straight > ROUTE_MAX_MM:
             return None
         box = LineString([p, q]).buffer(ROUTE_PAD_MM, cap_style=3).envelope
-        later = covers(k, color, box)
+        later = covers(k, color, box, skip)
         if not later:
             return None
         cover = unary_union(later).intersection(box)
@@ -345,6 +406,10 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
         # thin running-stitch letters a connector is as heavy as the letters' own lines
         # and reads as part of them.)
         allowed = ROUTE_OPEN_MM if (order_letter[k] and not order_thin[k]) else ALWAYS_JOIN_MM
+        if order_letter[k] and order_h[k]:
+            # (on small lettering the same connector is a bigger share of the letter: a
+            # line along the baseline under 5 mm letters, a stroke across the top of an S)
+            allowed = min(allowed, max(ALWAYS_JOIN_MM, LETTER_OPEN_SHARE * order_h[k]))
         if order_block[k] or (k > 0 and order_block[k - 1]):
             allowed = BLOCK_OPEN_MM
         if open_cells * cell > allowed:
@@ -372,13 +437,16 @@ def run(stitched: dict, palette: list, rules: dict, order: list | None = None,
             blocky = order_block[k] or (j > 0 and order_block[order_of[(n, j - 1)]])
             limit = BLOCK_OPEN_MM if blocky else ALWAYS_JOIN_MM
             short_ok = hop is not None and hop <= limit and not isinstance(sg, _NewLetter)
+            # (a piece of a fill cut off from the rows before it: those rows are sewn, so
+            # its own outline hides nothing)
+            skip = order_ids[k] if isinstance(sg, Cut) else None
             ok = hop is not None and hop <= rules["trim_jump_mm"] and (
-                short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), k, color))
+                short_ok or hidden_by_later(LineString([joined[-1][-1], sg[0]]), k, color, skip))
             if ok:
                 joined[-1] = joined[-1] + list(sg)
                 continue
             # (a thin running-stitch letter is never reached by travel: see _NewLetter)
-            route = (hidden_route(joined[-1][-1], sg[0], k, color)
+            route = (hidden_route(joined[-1][-1], sg[0], k, color, skip)
                      if hop is not None and not (isinstance(sg, _NewLetter) and order_thin[k])
                      else None)
             if route is not None:

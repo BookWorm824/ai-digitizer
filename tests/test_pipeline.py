@@ -164,11 +164,13 @@ def test_shape_with_a_thin_tail_is_split():
 
 @pytest.mark.parametrize("width", [0.7, 1.0, 1.5, 2.0])
 def test_line_near_the_width_limit_is_not_chopped_up(width):
-    """A ring whose width sits around the thin-line limit is sewn one way all the way round."""
+    """A ring whose width sits around the thin-line limit is sewn one way all the way round:
+    a run when it is finer than a bold line, else a satin (training session: borders are
+    satin from about 1 mm; rings follow the same rules as other lines)."""
     ring = Point(0, 0).buffer(30).difference(Point(0, 0).buffer(30 - width))
     objs = classify.run(_vec(ring), RULES)["objects"]
     assert 1 <= len(objs) <= 2 and len({o["kind"] for o in objs}) == 1
-    assert objs[0]["kind"] == ("run" if width < RULES["satin_min_mm"] else "satin")
+    assert objs[0]["kind"] == ("run" if width < RULES["line_bold_mm"] else "satin")
 
 
 def test_too_small_details_are_dropped_and_counted():

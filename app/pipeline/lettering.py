@@ -34,6 +34,8 @@ import math
 import re
 
 import numpy as np
+import shapely
+from shapely import affinity
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import substring, unary_union
 
@@ -571,7 +573,7 @@ def _plan(lines: tuple, dots: tuple, waits: tuple, wu: float, width: float,
     return plan
 
 
-def letter_strokes(pl: Placement, style: str = "block") -> list[dict]:
+def letter_strokes(pl: Placement, style: str = "block", sew: bool = False) -> list[dict]:
     """The strokes of one placed letter, in sewing order, each as
     {"pts": [(x, y) mm], "cut0", "cut1", "dot"} ready for column()."""
     g = GLYPHS[pl.ch]
@@ -644,7 +646,13 @@ def letter_strokes(pl: Placement, style: str = "block") -> list[dict]:
                 else:
                     cuts.append(("line", E, (v1[0] + v2[0], v1[1] + v2[1])))
             elif kind[0] == "tuck":
-                cuts.append(("ext", pl.w / 2))
+                # ending on the other stroke's centre line it is already half a stroke under
+                # it; carried only as far as a 0.3-0.5 mm tuck needs. A full stroke-width
+                # overlap shows as a bump on small letters (training session "Serif satin
+                # lettering": butt joins under about 6 mm, tuck 0.3-0.5 mm above)
+                # (only for the strokes sewn: the letter's outline for recognition and
+                # spacing keeps the full overlap it was tuned with)
+                cuts.append(("ext", max(0.0, TUCK_MM - pl.w / 2) if sew else pl.w / 2))
             else:
                 cuts.append(None)
         out.append({"pts": mm, "cut0": cuts[0], "cut1": cuts[1], "dot": False, "ret": ret})
@@ -669,6 +677,17 @@ def extent(pl: Placement, style: str = "block") -> tuple[float, float]:
     key = (pl.ch, style, round(pl.H, 2), round(pl.w, 3), round(pl.k, 3))
     if key not in _EXTENT_CACHE:
         probe = Placement(pl.ch, 0.0, 0.0, pl.H, pl.w, pl.k)
+        if pl.w <= LINE_W_MM + 1e-6:
+            # a thin line letter: its lines plus half a thread each side (a satin outline
+            # would count square-cut arm ends short and slanted legs long)
+            lines = [LineString(st["pts"]) for st in letter_strokes(probe, style)
+                     if not st["dot"] and len(st["pts"]) > 1]
+            if lines:
+                b = unary_union(lines).bounds
+                _EXTENT_CACHE[key] = (b[0] - LINE_W_MM / 2, b[2] + LINE_W_MM / 2)
+            else:
+                _EXTENT_CACHE[key] = (0.0, probe.outer_width())
+            return _EXTENT_CACHE[key]
         o = outline_of(probe, style)
         _EXTENT_CACHE[key] = (o.bounds[0], o.bounds[2]) if not o.is_empty else (0.0, probe.outer_width())
         if len(_EXTENT_CACHE) > 5000:
@@ -677,10 +696,12 @@ def extent(pl: Placement, style: str = "block") -> tuple[float, float]:
 
 
 def layout(text: str, H: float, x: float, y: float, style: str = "block",
-           anchor: str = "center", w: float | None = None) -> list[Placement]:
+           anchor: str = "center", w: float | None = None, gap: float = 0.0) -> list[Placement]:
     """Set a line of text at cap height H. (x, y) is the middle of the line (anchor
-    "center") or the left end of its baseline (anchor "baseline")."""
+    "center") or the left end of its baseline (anchor "baseline"). `gap` mm is added
+    between letters."""
     w = w or width_for(H, style)
+    track = TRACKING * H + gap
     pls, cur = [], 0.0
     for ch in text:
         if ch.isspace() or ch not in GLYPHS:
@@ -690,8 +711,8 @@ def layout(text: str, H: float, x: float, y: float, style: str = "block",
         lo, hi = extent(pl, style)
         pl.bx = cur - lo
         pls.append(pl)
-        cur += (hi - lo) + TRACKING * H
-    total = cur - TRACKING * H if pls else 0.0
+        cur += (hi - lo) + track
+    total = cur - track if pls else 0.0
     if anchor == "center":
         dx, by = x - total / 2, y + H / 2
     else:
@@ -702,13 +723,29 @@ def layout(text: str, H: float, x: float, y: float, style: str = "block",
     return pls
 
 
+_OUTLINE_CACHE: dict = {}
+
+
 def outline_of(pl: Placement, style: str = "block") -> Polygon:
-    parts = []
-    for st in letter_strokes(pl, style):
-        col = column(st["pts"], pl.w, st["cut0"], st["cut1"])
-        if col:
-            parts.append(col["outline"])
-    return unary_union(parts) if parts else Polygon()
+    """The ground a placed letter covers. Built once per letter, size and stretch, and moved
+    into place (word recognition tries every candidate word on the same letters)."""
+    key = (pl.ch, style, round(pl.H, 4), round(pl.w, 4), round(pl.k, 4), bool(pl.run))
+    base = _OUTLINE_CACHE.get(key)
+    if base is None:
+        probe = Placement(pl.ch, 0.0, 0.0, pl.H, pl.w, pl.k, pl.run)
+        probe.heavy = getattr(pl, "heavy", False)
+        parts = []
+        for st in letter_strokes(probe, style):
+            col = column(st["pts"], probe.w, st["cut0"], st["cut1"])
+            if col:
+                parts.append(col["outline"])
+        base = unary_union(parts) if parts else Polygon()
+        if len(_OUTLINE_CACHE) > 20000:
+            _OUTLINE_CACHE.clear()
+        _OUTLINE_CACHE[key] = base
+    if base.is_empty:
+        return base
+    return affinity.translate(base, pl.bx, pl.by)
 
 
 # --------------------------------------------------------------------- stitch objects
@@ -720,6 +757,13 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
     out = []
     narrow_from = max(rules.get("text_run_mm", RUN_BELOW_MM),
                       rules.get("text_narrow_satin_mm", NARROW_TEXT_MM))
+    chain: list = []                      # running-stitch letters waiting to be sewn
+
+    def flush():
+        if chain:
+            out.extend(_run_words(list(chain), style, color, group, row))
+            chain.clear()
+
     for li, pl in enumerate(pls):
         satin_from = max(rules.get("text_run_mm", RUN_BELOW_MM),
                          MIN_SATIN_MM / SATIN_MAX_RATIO, SATIN_TEXT_MM)
@@ -727,10 +771,10 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
         if narrow:
             pl = _as_narrow(pl)
         elif pl.run or pl.H < satin_from:
-            pl = _as_line(pl)
-            out.extend(_run_letter(pl, style, color, group, li, row))
+            chain.append((li, _as_line(pl)))
             continue
-        strokes = letter_strokes(pl, style)
+        flush()
+        strokes = letter_strokes(pl, style, sew=True)
         # wide satin is split across the column when sewn (stitch.split_long), so letters
         # stay satin up to twice the longest stitch; only wider strokes become fill
         wide = pl.w > SPLIT_SATIN_MAX * rules.get("satin_max_mm", 7.0)
@@ -745,7 +789,9 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                 continue
             o = {"kind": "satin", "color": color, "center": col["center"], "half": col["half"],
                  "left": col["left"], "right": col["right"], "outline": col["outline"],
-                 "width_mm": float(pl.w), "area_mm2": float(col["outline"].area), "seq": seq}
+                 "width_mm": float(pl.w), "area_mm2": float(col["outline"].area), "seq": seq,
+                 "spacing_width": float(pl.w),
+                 "text_h": float(pl.H)}
             if text_style:
                 o.update(text_style)
             # The plan says where each stroke ends: at its far end, or (sewn out along its
@@ -764,6 +810,75 @@ def objects(pls: list[Placement], color: int, rules: dict, style: str = "block",
                 if row is not None:
                     o["text_row"] = row
                 out.append(o)
+    flush()
+    return out
+
+
+TUCK_MM = 0.4           # a stroke ending on another reaches this far under it
+LINE_GAP_MM = 0.3       # extra room between thin line letters set as a line
+THIN_JOIN_MM = 0.6      # running-stitch letters this close (nearly touching) are joined, not cut
+THIN_JOIN_H = 0.45      # ... and no farther apart than this share of the cap height
+
+
+def _letter_lines(pl: Placement, style: str) -> list:
+    return [np.asarray(st["pts"], float) for st in letter_strokes(pl, style)
+            if not st["dot"] and LineString(st["pts"]).length >= 0.3]
+
+
+def _run_words(chain: list, style: str, color: int, group, row) -> list:
+    """Running-stitch letters, a word at a time as one continuous thread. Neighbouring
+    letters close together (within a word, not across a space or beside punctuation) are
+    joined at their closest points by a short stitch, and the whole word is walked out and
+    back (each line twice), so it needs no trims inside it: pros connect micro lettering
+    with runs, never trims, and walk straight across gaps up to about 1.2 mm (Amann, Wilcom
+    "trim if connector is over 3 mm")."""
+    from shapely.geometry import MultiLineString  # noqa: PLC0415
+    from shapely.ops import nearest_points  # noqa: PLC0415
+    words, cur = [], []
+    prev_lines = None
+    for li, pl in chain:
+        lines = _letter_lines(pl, style)
+        joined = None
+        if cur and prev_lines and lines and pl.ch.isalnum() and cur[-1][1].ch.isalnum():
+            a, b = nearest_points(MultiLineString([l.tolist() for l in prev_lines]),
+                                  MultiLineString([l.tolist() for l in lines]))
+            gap = a.distance(b)
+            if gap <= min(THIN_JOIN_MM, THIN_JOIN_H * pl.H):
+                joined = np.asarray([(a.x, a.y), (b.x, b.y)]) if gap > 1e-3 else None
+                cur.append((li, pl, lines, joined, True))
+                prev_lines = lines
+                continue
+        if cur:
+            words.append(cur)
+        cur = [(li, pl, lines, None, False)]
+        prev_lines = lines
+    if cur:
+        words.append(cur)
+    out = []
+    for word in words:
+        if len(word) == 1:
+            li, pl = word[0][0], word[0][1]
+            out.extend(_run_letter(pl, style, color, group, li, row))
+            continue
+        lines = []
+        for _li, _pl, ls, link, _j in word:
+            lines.extend(ls)
+            if link is not None:
+                lines.append(link)
+        li0, pl0 = word[0][0], word[0][1]
+        H = pl0.H
+        for k, route in enumerate(_letter_tours(lines)):
+            o = {"kind": "run", "color": color, "line": LineString(np.vstack(route)),
+                 "route": route, "width_mm": 0.6, "bean": False,
+                 "bold": H >= 4.5 or any(w[1].heavy for w in word),
+                 "stitch_mm": float(np.clip(0.3 * H, 0.7, 1.25)) if H < 4.0 else 1.6,
+                 "seq": (group, li0, k), "punct": False}
+            if row is not None:
+                o["text_row"] = row
+            out.append(o)
+        for li, pl, _ls, _link, _j in word:     # the dots, after the word
+            out.extend(o for o in _run_letter(pl, style, color, group, li, row)
+                       if o["seq"][2] >= 100)
     return out
 
 
@@ -908,9 +1023,25 @@ def _typical_width(p) -> float:
     return 2.0 * p.area / max(p.length, 1e-9)
 
 
+_STROKE_CACHE: dict = {}
+
+
 def stroke_width(p) -> float:
     """The width of a letter's main strokes: how far it can be shrunk from both sides before
-    almost nothing is left. Unlike 2 x area / outline, serifs and corners don't drag it down."""
+    almost nothing is left. Unlike 2 x area / outline, serifs and corners don't drag it down.
+    (The same traced letter is measured for every candidate word: kept once measured.)"""
+    key = (p.wkb,) if p.area > 0 else None
+    if key is not None and key in _STROKE_CACHE:
+        return _STROKE_CACHE[key]
+    w = _stroke_width(p)
+    if key is not None:
+        if len(_STROKE_CACHE) > 20000:
+            _STROKE_CACHE.clear()
+        _STROKE_CACHE[key] = w
+    return w
+
+
+def _stroke_width(p) -> float:
     lo, hi = 0.0, max(0.2, min(p.bounds[2] - p.bounds[0], p.bounds[3] - p.bounds[1]))
     if p.area <= 0:
         return 0.0
@@ -1028,7 +1159,16 @@ def fit_line(text: str, box: tuple, H: float, w: float, style: str = "block",
     its width. Used when small traced letters are too merged to place one by one."""
     minx, miny, maxx, maxy = box
     cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
-    pls = layout(text, H, cx, cy, style, w=w)
+    if run or H < NARROW_TEXT_MM:
+        # letters sewn as thin lines are spaced by their lines, not by satin letters'
+        # outlines: a satin K or A splays at its feet and an E's arms are cut square, and
+        # the same gaps between satin outlines come out uneven between thin lines
+        # (F RESH BAK ED)
+        pls = layout(text, H, cx, cy, style, w=LINE_W_MM, gap=LINE_GAP_MM)
+        for pl in pls:
+            pl.run = True
+    else:
+        pls = layout(text, H, cx, cy, style, w=w)
     if not pls:
         return pls
     lo = pls[0].bx + extent(pls[0], style)[0]
@@ -1049,24 +1189,57 @@ def fit_line(text: str, box: tuple, H: float, w: float, style: str = "block",
     return pls
 
 
+def _overlap(outlines: list, glyphs: list, grow: float) -> tuple[float, float]:
+    ours = unary_union(outlines)
+    theirs = unary_union(glyphs)
+    if grow > 0:
+        theirs = theirs.buffer(grow, quad_segs=4)
+    return ours.union(theirs).area, ours.intersection(theirs).area
+
+
 def score(pls: list[Placement], glyphs: list, style: str = "block") -> float:
     """How well retyped letters cover the traced ones: overlap / union over the whole row,
     lowered when the number of letters doesn't match the number of traced shapes (two
     touching letters trace as one shape, so a small difference is allowed)."""
-    ours = unary_union([outline_of(pl, style) for pl in pls])
-    theirs = unary_union(glyphs)
+    outlines = [outline_of(pl, style) for pl in pls]
     # traced letters drawn much thinner than the font's strokes are compared at the font's
     # weight: otherwise even the right word covers little of them
     t = float(np.median([stroke_width(g) for g in glyphs]))
     w = float(np.median([pl.w for pl in pls]))
-    if w > 1.3 * t:
-        theirs = theirs.buffer((w - t) / 2.0, quad_segs=4)
-    union = ours.union(theirs).area
+    grow = (w - t) / 2.0 if w > 1.3 * t else 0.0
+    try:
+        union, inter = _overlap(outlines, glyphs, grow)
+    except shapely.errors.GEOSException:
+        # (nearly touching edges of letters moved into place can trip the geometry
+        # library: snapped to a 0.1 micrometre grid they don't)
+        union, inter = _overlap([shapely.set_precision(o, 1e-4) for o in outlines],
+                                [shapely.set_precision(g, 1e-4) for g in glyphs], grow)
     if not union:
         return 0.0
-    iou = ours.intersection(theirs).area / union
+    iou = inter / union
     n, m = len(pls), len(glyphs)
     return iou * (1.0 - 0.6 * abs(n - m) / max(n, m))
+
+
+WORD_MISMATCH = 0.8       # each word too many or too few in a candidate costs this factor
+MAX_SPACE = 1.2           # ...but no wider than this many letter heights
+WORD_GAP = 2.2            # a gap this many times the typical letter gap is a word space
+
+
+def _word_count(glyphs: list) -> int:
+    """How many words a traced row shows, from its gaps (0 when too few letters to tell)."""
+    if len(glyphs) < 5:
+        return 0
+    bs = sorted((g.bounds for g in glyphs), key=lambda b: b[0])
+    h = float(np.median([b[3] - b[1] for b in bs]))
+    gaps = [b2[0] - b1[2] for b1, b2 in zip(bs, bs[1:])]
+    pos = [g for g in gaps if g > 0]
+    if not pos:
+        return 0
+    typical = float(np.median(pos))
+    # (a gap wider than a letter is a letter missing from the row, merged into something
+    # else, not a space)
+    return 1 + sum(1 for g in gaps if max(WORD_GAP * typical, 0.35 * h) < g < MAX_SPACE * h)
 
 
 PART_MIN_LETTERS = 3      # the shortest piece of a long word a broken row may be matched to
@@ -1081,8 +1254,8 @@ def _parts(lines: list[str]) -> list[tuple]:
         words = [w for w in re.split(r"\s+", line.strip()) if w]
         for a, word in enumerate(words):
             w = word.upper()
-            if len(letters_of(w)) < 2 * PART_MIN_LETTERS:
-                continue
+            if len(letters_of(w)) < 2 * PART_MIN_LETTERS or not w.isalpha():
+                continue          # (only plain words: a web address or number matches anything)
             for k in range(1, len(w)):
                 if k >= PART_MIN_LETTERS:
                     out.append((w[:k], n, a, a + 1))
@@ -1107,6 +1280,7 @@ def fit_row(glyphs: list, lines: list[str], style: str = "block",
     if w0 > LETTER_MAX_RATIO * h:
         return None                  # solid blobs in a row (windows, say), not letters
     whole_best = None
+    traced_words = _word_count(glyphs)
     whole = [(c, False) for c in _candidates(lines)]
     for (cand, line, a, b), part in whole + ([(c, True) for c in _parts(lines)] if parts else []):
         m = len(letters_of(cand))
@@ -1116,6 +1290,10 @@ def fit_row(glyphs: list, lines: list[str], style: str = "block",
         if not pls:
             continue
         sc = score(pls, glyphs, style)
+        if traced_words and not part:
+            # the row's word gaps must agree: at 2 mm any 13 letters cover a traced row about
+            # as well, but a three-word tagline is not a two-word name
+            sc *= WORD_MISMATCH ** abs(traced_words - len(cand.split()))
         if not part and (whole_best is None or sc > whole_best[0]):
             whole_best = (sc, (line, a, b))
         if best is None or sc > best["score"]:

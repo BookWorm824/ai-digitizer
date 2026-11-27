@@ -135,7 +135,9 @@ def straighten(nodes: np.ndarray, edges: list[dict], axes: list[float],
         # calling an edge a curve (still under one thread width)
         pieces = geometry.fit(e["pts"], False, tol=LINE_TOL_MM)
         e["straight"] = len(pieces) == 1 and pieces[0]["kind"] == "line"
-        arc = None if e["straight"] else _arc(e["pts"])
+        arc = None if e["straight"] else _circle_arc(e["pts"])
+        if arc is None and not e["straight"]:
+            arc = _arc(e["pts"])
         if arc is not None:
             e["pts"] = arc                            # an arch: one smooth curve
         elif not e["straight"] and pieces:
@@ -244,6 +246,47 @@ def _round_rings(nodes: np.ndarray, edges: list[dict], circles: list) -> np.ndar
             for node, end in ((e["a"], e["pts"][0]), (e["b"], e["pts"][-1])):
                 nodes[node] = end
     return nodes
+
+
+def _circle_arc(pts) -> np.ndarray | None:
+    """If a line follows a true circle closely (a badge ring, part of a circle broken by a
+    banner), the line as that circle's arc, else None. Fitted to the whole line at once, so a
+    corner where the ring meets something else at its very end doesn't spoil it."""
+    p = np.asarray(pts, float)
+    if len(p) < 8:
+        return None
+    seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
+    if seg.sum() < CIRCLE_MIN_LEN_MM:
+        return None
+    # algebraic circle fit (Kasa): x^2 + y^2 + D x + E y + F = 0
+    A = np.column_stack([p[:, 0], p[:, 1], np.ones(len(p))])
+    b = -(p[:, 0] ** 2 + p[:, 1] ** 2)
+    try:
+        (D, E, F), *_ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx, cy = -D / 2.0, -E / 2.0
+    r2 = cx * cx + cy * cy - F
+    if r2 <= 0:
+        return None
+    r = float(np.sqrt(r2))
+    d = np.hypot(p[:, 0] - cx, p[:, 1] - cy)
+    if np.abs(d - r).max() > CIRCLE_TOL_MM or not (1.0 <= r <= 200.0):
+        return None
+    ang = np.unwrap(np.arctan2(p[:, 1] - cy, p[:, 0] - cx))
+    sweep = float(ang[-1] - ang[0])
+    if abs(sweep) < np.radians(CIRCLE_MIN_SWEEP_DEG) or np.any(np.diff(ang) * np.sign(sweep) < -0.05):
+        return None                         # not one steady sweep round the centre
+    n = max(8, int(abs(sweep) * r / 0.3) + 1)
+    t = np.linspace(ang[0], ang[-1], n)
+    out = np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t)])
+    out[0], out[-1] = p[0], p[-1]           # ends stay on their junctions
+    return out
+
+
+CIRCLE_TOL_MM = 0.25       # a line this close to a true circle all along is that circle
+CIRCLE_MIN_LEN_MM = 6.0    # ...if it is at least this long
+CIRCLE_MIN_SWEEP_DEG = 40  # ...and sweeps at least this far round
 
 
 def _arc(pts) -> np.ndarray | None:

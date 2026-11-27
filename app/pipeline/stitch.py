@@ -27,6 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from shapely import affinity
+from skimage.graph import MCP_Geometric
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
 from shapely.ops import substring, unary_union, voronoi_diagram
 from shapely.prepared import prep
@@ -43,6 +44,11 @@ UNDERLAY_STITCH_MM = 2.0           # stitch length of underlay runs
 
 # ----------------------------------------------------------------------------- running stitch
 
+PLAN_TRIES = 16                 # other first sections tried when the order leaves cuts
+PLAN_SECTIONS = 14              # fills with up to this many sections get their order searched
+SEEN_COST = 200.0               # walking a grid cell of finished rows costs this many of open ground
+NEAR_FILLED_MM = 0.8            # travel keeps this far off finished rows, or counts as on them
+SHOW_TRAVEL_MM = 2.0            # travel across finished fill rows longer than this is cut
 TIGHT_CURVE_STITCH_MM = 1.0     # shortest run stitch, used only round small circles
 SMALL_PART_MM2 = 12.0           # a fill smaller than this is a small solid part (sequence)
 TINY_RING_MM = 9.0              # ... and round very small ones (under about 3 mm across)
@@ -133,11 +139,61 @@ def _outline_satin(route: list, widths: list, rules: dict):
         d = degree.get(tuple(np.round(end, 3)), 1)
         return 0.0 if d <= 1 else (w / 2.0 if d == 2 else min(w / 2.0, 0.5))
 
+    # At a joint of three or more lines, the two that run most nearly straight through it
+    # carry on (sewn over the others); every other line stops just under the edge of that
+    # through line instead of crossing the joint too. Each line lapping half a millimetre
+    # past the centre stacked a layer per line: a knot where six fronds meet (training
+    # session "Line art at left chest": one stroke continuous on top, the rest ending
+    # under it, never more than two layers of satin at a point).
+    def ekey(poly):
+        a, b = tuple(np.round(poly[0], 3)), tuple(np.round(poly[-1], 3))
+        return (a, b) if a <= b else (b, a)
+
+    arms: dict = {}
+    for k, poly in enumerate(route):
+        if len(poly) < 2:
+            continue
+        ls = LineString(poly)
+        reach = min(1.0, ls.length / 3.0)
+        for node, far in ((poly[0], ls.interpolate(reach)), (poly[-1], ls.interpolate(ls.length - reach))):
+            n = tuple(np.round(node, 3))
+            v = np.array([far.x - node[0], far.y - node[1]], float)
+            nv = np.linalg.norm(v)
+            if nv > 1e-9:
+                w_k = widths[k] if k < len(widths) else 0.0
+                arms.setdefault(n, {})[ekey(poly)] = (v / nv, w_k)
+    through: dict = {}
+    for n, es in arms.items():
+        if len(es) < 3:
+            continue
+        keys = list(es)
+        best = min(((float(np.dot(es[a][0], es[b][0])), a, b)
+                    for i, a in enumerate(keys) for b in keys[i + 1:]), key=lambda t: t[0])
+        through[n] = ({best[1], best[2]}, max(es[best[1]][1], es[best[2]][1]))
+
+    def back(end, poly):
+        n = tuple(np.round(end, 3))
+        if n not in through or ekey(poly) in through[n][0]:
+            return 0.0
+        return max(0.0, through[n][1] / 2.0 - JOINT_TUCK_MM)
+
     def satin(k, poly):
         w = widths[k] if k < len(widths) else 0.0
         if w <= 0 or len(poly) < 2:
             return None
         w = min(w, most)
+        b0, b1 = back(poly[0], poly), back(poly[-1], poly)
+        if (b0 or b1) and LineString(poly).length - b0 - b1 < 2.5 * w:
+            b0 = b1 = 0.0               # a short piece between joints keeps its full length:
+                                        # cut back, it would be too short for satin
+        if b0 or b1:
+            ls = LineString(poly)
+            short = list(substring(ls, b0, ls.length - b1).coords)
+            start_ext = 0.0 if b0 else past(poly[0], w)
+            end_ext = 0.0 if b1 else past(poly[-1], w)
+            poly = short
+        else:
+            start_ext, end_ext = past(poly[0], w), past(poly[-1], w)
         loose = min(degree.get(tuple(np.round(poly[0], 3)), 1),
                     degree.get(tuple(np.round(poly[-1], 3)), 1)) <= 1
         if loose and LineString(poly).length < 2.5 * w:
@@ -148,8 +204,8 @@ def _outline_satin(route: list, widths: list, rules: dict):
         legs = _legs(np.asarray(poly, float))
         pts: list = []
         for j, leg in enumerate(legs):
-            c0 = ("ext", w / 2.0) if j > 0 else ("ext", past(poly[0], w))
-            c1 = ("ext", w / 2.0) if j < len(legs) - 1 else ("ext", past(poly[-1], w))
+            c0 = ("ext", w / 2.0) if j > 0 else ("ext", start_ext)
+            c1 = ("ext", w / 2.0) if j < len(legs) - 1 else ("ext", end_ext)
             col = lettering.column(leg, w, c0, c1)
             if not col:
                 continue
@@ -162,6 +218,7 @@ def _outline_satin(route: list, widths: list, rules: dict):
     return satin
 
 
+JOINT_TUCK_MM = 0.3        # a line ending at a joint reaches this far under the through line
 CORNER_TURN_DEG = 50.0     # a turn this sharp in a line is a corner, not a bend
 
 
@@ -238,7 +295,10 @@ def stitch_satin(obj: dict, rules: dict) -> list:
     # scaled down on columns under 2.5 mm so fine outlines and small letters stay fine.
     grow = min(0.5, rules["pull_comp_mm"] + 0.05 * width) * min(1.0, width / 2.5)
     grow *= obj.get("comp_scale", 1.0)
-    left, right = edge_l + unit * grow, edge_r - unit * grow
+    # (no push on an edge that lies under a later color: it is hidden there, and pushed out
+    # it peeks past the outline drawn over it)
+    left = edge_l + unit * grow * obj.get("comp_left", 1.0)
+    right = edge_r - unit * grow * obj.get("comp_right", 1.0)
     inset = np.minimum(rules.get("underlay_inset_mm", 0.5), half * 0.3)[:, None]
     in_left, in_right = edge_l - unit * inset, edge_r + unit * inset
 
@@ -317,8 +377,13 @@ def stitch_satin(obj: dict, rules: dict) -> list:
     elif finish == "far" and not top_forward:
         pts += run_along(mid, False)
         top_forward = True
-    spacing = satin_spacing(width, rules) * obj.get("spacing_scale", 1.0)
-    pts += zigzag(left, right, spacing, top_forward, short=True)
+    # (lettering: one spacing for the whole word, from its main stroke width, so arms,
+    # serifs and curves aren't sewn denser or more open than the stems: training session
+    # "Serif satin lettering", no letter or part of one gets its own density)
+    spacing = satin_spacing(obj.get("spacing_width") or width, rules) * obj.get("spacing_scale", 1.0)
+    # (short stitches on the inside of tight curves only on columns wide enough to need
+    # them: on small lettering they leave the inside edge ragged; pros turn them off)
+    pts += zigzag(left, right, spacing, top_forward, short=width >= SHORT_STITCH_MIN_W_MM)
     satin_max = rules.get("satin_max_mm", 7.0)
     if width + 2 * grow > satin_max:
         # every crossing of the column (underlay, the step to the top, the top) is split
@@ -461,6 +526,7 @@ def _entry(sec: list, top_first: bool, left_first: bool) -> tuple:
     return (a if left_first else b, y)
 
 
+
 class _Router:
     """Finds a path between two points that stays inside a shape, for when a straight line
     would cross a hole or leave the shape. Works on a coarse grid of the shape, and prefers
@@ -479,6 +545,7 @@ class _Router:
         self.cell = max(0.5, max(maxx - minx, maxy - miny) / 220.0)
         self.minx, self.miny = minx, miny
         self.any_filled = False
+        self.near = None
 
     def _cell(self, pt):
         return (int(round((pt[0] - self.minx) / self.cell)) + 1,
@@ -501,7 +568,11 @@ class _Router:
         self.filled = np.zeros((h, w), np.uint8)
         # cells within about two cells of the shape's edge: thread laid there is the least
         # noticeable place to cross ground that is already filled
-        inner = cv2.erode(self.mask, np.ones((3, 3), np.uint8), iterations=2)
+        # (the outer edge only: nothing covers the edge of a hole cut out of a fill, such as
+        # a star in a flag, so thread laid round it shows as a dark line)
+        outer = np.zeros_like(self.mask)
+        cv2.fillPoly(outer, [px(self.shape.exterior.coords)], 1)
+        inner = cv2.erode(outer, np.ones((3, 3), np.uint8), iterations=2)
         self.edge = (self.mask == 1) & (inner == 0)
 
     def along_edge(self, p, q, tol: float = 1.2):
@@ -512,9 +583,16 @@ class _Router:
         if self.rings is None:
             self.rings = [LineString(r.coords) for r in (self.shape.exterior, *self.shape.interiors)
                           if r.length > 1.0]
+            outer = self.rings and self.rings[0].length == self.shape.exterior.length
+            self.holes = {id(r) for r in self.rings[1:]} if outer else set()
         P, Q = Point(p), Point(q)
         ring = min(self.rings, key=lambda r: r.distance(P), default=None)
         if ring is None or ring.distance(P) > tol or ring.distance(Q) > tol:
+            return None
+        if id(ring) in self.holes and not self.light:
+            # (not round a hole: nothing covers the edge of a star cut out of a fill, and the
+            # thread shows there as a dark line; the outer edge usually gets an outline or a
+            # neighbour sewn over it)
             return None
         a, b, total = ring.project(P), ring.project(Q), ring.length
         fwd = (b - a) % total
@@ -555,6 +633,50 @@ class _Router:
         return all(self.loose.contains(LineString([a, b]))
                    for a, b in zip(path, path[1:]) if dist(a, b) > 1e-6)
 
+    def over_filled(self, path) -> float:
+        """How far (mm) a route runs across finished rows away from the edge: thread laid
+        there shows on top as a line."""
+        if self.mask is None or not self.any_filled:
+            return 0.0
+        h, w = self.mask.shape
+        near = self._near()
+        total = 0.0
+        for a, b in zip(path, path[1:]):
+            n = max(1, int(dist(a, b) / (0.5 * self.cell)) + 1)
+            step = dist(a, b) / n
+            for k in range(n):
+                x = a[0] + (b[0] - a[0]) * (k + 0.5) / n
+                y = a[1] + (b[1] - a[1]) * (k + 0.5) / n
+                cx, cy = self._cell((x, y))
+                if 0 <= cx < w and 0 <= cy < h and near[cy, cx] and not self.edge[cy, cx]:
+                    total += step
+        return total
+
+    def reach(self, p):
+        """Cost of walking from p to every grid cell: open ground costs its length, the
+        outer edge a little more, finished rows (and their border) very much more, so the
+        cheapest next section is one the thread can reach unseen."""
+        if self.mask is None:
+            self._build()
+        inside = self.mask == 1
+        cost = np.where(inside, 1.0, np.inf)
+        if self.any_filled:
+            over = (self._near() == 1) & inside
+            cost[over & self.edge] = 3.0
+            cost[over & ~self.edge] = SEEN_COST
+        h, w = cost.shape
+        cx, cy = self._cell(p)
+        cx, cy = min(w - 1, max(0, cx)), min(h - 1, max(0, cy))
+        cost[cy, cx] = max(1.0, min(cost[cy, cx], SEEN_COST))
+        cum, _ = MCP_Geometric(cost).find_costs([(cy, cx)])
+        return cum
+
+    def cost_at(self, cum, pt) -> float:
+        h, w = cum.shape
+        cx, cy = self._cell(pt)
+        win = cum[max(0, cy - 1):min(h, cy + 2), max(0, cx - 1):min(w, cx + 2)]
+        return float(win.min()) if win.size else float("inf")
+
     def mark_filled(self, section: list) -> None:
         """Remember that these rows (in this router's own frame) are now covered in thread."""
         if self.mask is None:
@@ -567,49 +689,40 @@ class _Router:
             if 0 <= cy < h:
                 self.filled[cy, max(0, ca):min(w, cb + 1)] = 1
         self.any_filled = True
+        self.near = None
+
+    def _near(self):
+        """Finished rows grown by about a millimetre: thread laid right along the border of
+        finished stitching lies on its row ends and shows as a line, so it counts too."""
+        if self.near is None:
+            grow = max(1, int(round(NEAR_FILLED_MM / self.cell)))
+            self.near = cv2.dilate(self.filled, np.ones((3, 3), np.uint8), iterations=grow)
+        return self.near
 
     def __call__(self, p, q):
         if self.mask is None:
             self._build()
-        mask, filled, edge = self.mask, self.filled, self.edge
+        mask, edge = self.mask, self.edge
+        filled = self._near() if self.any_filled else self.filled
         h, w = mask.shape
         s, t = self._cell(p), self._cell(q)
-        best = {s: 0.0}
-        prev = {s: None}
-        heap = [(0.0, s)]
-        steps = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
-                 (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414))
-        while heap:
-            d, c = heapq.heappop(heap)
-            if c == t:
-                break
-            if d > best.get(c, 1e18):
-                continue
-            for dx, dy, cost in steps:
-                n = (c[0] + dx, c[1] + dy)
-                if not (0 <= n[0] < w and 0 <= n[1] < h):
-                    continue
-                if not (mask[n[1], n[0]] or n == t):
-                    continue
-                if self.light:
-                    weight = 1.0 if edge[n[1], n[0]] else 6.0
-                elif not filled[n[1], n[0]]:
-                    weight = 1.0                 # will be covered by later stitches
-                else:
-                    weight = 3.0 if edge[n[1], n[0]] else 9.0
-                nd = d + cost * weight
-                if nd < best.get(n, 1e18):
-                    best[n] = nd
-                    prev[n] = c
-                    heapq.heappush(heap, (nd, n))
-        if t not in prev:
+        if not (0 <= s[0] < w and 0 <= s[1] < h and 0 <= t[0] < w and 0 <= t[1] < h):
             return None
-        cells = []
-        c = t
-        while c is not None:
-            cells.append(c)
-            c = prev[c]
-        cells.reverse()
+        # cost of each grid cell (shortest weighted path, as a grid of cells: open ground
+        # still to be filled is cheap, the edge cheaper than finished rows)
+        inside = mask == 1
+        if self.light:
+            cost = np.where(edge, 1.0, 6.0)
+        else:
+            cost = np.where(filled == 1, np.where(edge, 3.0, 9.0), 1.0)
+        cost = np.where(inside, cost, np.inf)
+        cost[s[1], s[0]] = max(1.0, min(cost[s[1], s[0]], 9.0))
+        cost[t[1], t[0]] = max(1.0, min(cost[t[1], t[0]], 9.0))
+        mcp = MCP_Geometric(cost)
+        cum, _ = mcp.find_costs([(s[1], s[0])], [(t[1], t[0])])
+        if not np.isfinite(cum[t[1], t[0]]):
+            return None
+        cells = [(c, r) for r, c in mcp.traceback((t[1], t[0]))]
         pts = [p] + [((cx - 1) * self.cell + self.minx, (cy - 1) * self.cell + self.miny)
                      for cx, cy in cells[1:-1]] + [q]
         if self.any_filled or self.light:
@@ -643,6 +756,8 @@ def _travel(p, q, inside, router: _Router, step: float):
             if path is not None and not router.stays_in(path):
                 # the grid route cut across a notch of open fabric: go round by the edge
                 path = router.along_edge(p, q)
+            if path is not None and not router.light and router.over_filled(path) > SHOW_TRAVEL_MM:
+                return None             # it would lie across finished rows: cut and jump
         if path is None:
             return None
         path = router.pulled_in(path)
@@ -662,6 +777,10 @@ def _travel(p, q, inside, router: _Router, step: float):
 # shows through.)
 ROW_SHARE = 0.5
 
+SHORT_STITCH_MIN_W_MM = 2.0     # satin narrower than this gets no short stitches
+ALT_TILT_DEG = 5.0             # level rows, tried too when the usual angle leaves cuts in a
+                               # fill, tilt this much for every other color
+ALT_MAX_CUTS = 12               # ... a few cuts, that is
 FILL_ANGLES = (18.0, 162.0)   # deep-dive rule 38: 15-20 deg off level (or its mirror), never
                               # 45 deg (the fabric stretches on the bias), never upright
 
@@ -694,7 +813,8 @@ def best_fill_angle(poly: Polygon, base: float, spacing: float) -> float:
 def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float,
                   start=None, travel_step: float = 2.5,
                   extend: float = 0.0, rng=None, jitter: float = 0.0,
-                  ragged: float = 0.0, light: bool = False) -> list[list[tuple[float, float]]]:
+                  ragged: float = 0.0, light: bool = False,
+                  search: bool = True) -> list[list[tuple[float, float]]]:
     """Fill a polygon with rows at the given angle. Returns one or more thread segments.
     With `rng`: random needle placement (`jitter`) and row ends cut back at random by up to
     `ragged` mm, so the fill has a soft, uneven edge (foliage, fur, grass)."""
@@ -708,56 +828,102 @@ def fill_segments(poly: Polygon, angle_deg: float, spacing: float, length: float
     if not sections:
         return []
     inside = prep(rot.buffer(INSIDE_TOL_MM + extend))
-    router = _Router(rot, inside, light)
     ca, sa = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
     cur = None
     if start is not None:   # rotate the start point into the working frame
         cur = (start[0] * ca + start[1] * sa, -start[0] * sa + start[1] * ca)
 
-    segments, seg = [], []
-    todo = list(range(len(sections)))
-    while todo:
-        best = None
-        for s in todo:
-            for top in (True, False):
-                for left in (True, False):
-                    d = 0.0 if cur is None else dist(cur, _entry(sections[s], top, left))
-                    if best is None or d < best[0]:
-                        best = (d, s, top, left)
-            if cur is None:
-                break
-        _, s, top, left = best
-        todo.remove(s)
-        pts = _section_points(sections[s], top, left, length, rng, jitter, inside)
-        if seg:
-            walk = _travel(seg[-1], pts[0], inside, router, travel_step)
-            if walk is None:
-                segments.append(seg)
-                seg = []
+    def plan(first=None, limit=None):
+        """Sew the sections nearest-first (from `first`, a (section, top, left) choice, when
+        given). Returns (segments, cuts, travel) or None once cuts pass `limit`."""
+        router = _Router(rot, inside, light)
+        segments, seg, here, cuts, travel = [], [], cur, 0, 0.0
+        todo = list(range(len(sections)))
+        while todo:
+            if first is not None and len(todo) == len(sections):
+                _, s, top, left = (0.0, *first)
             else:
-                seg.extend(walk)
-        seg.extend(pts)
-        cur = seg[-1]
-        if todo:
-            router.mark_filled(sections[s])
-    segments.append(seg)
+                # the next section is the one the thread reaches most cheaply: nearest by
+                # way of open ground, never by a walk across finished rows if any other
+                # can be reached unseen
+                cum = (router.reach(here) if here is not None and router.any_filled
+                       and not light else None)
+                options = []
+                for s in todo:
+                    for top in (True, False):
+                        for left in (True, False):
+                            e = _entry(sections[s], top, left)
+                            d = 0.0 if here is None else dist(here, e)
+                            if cum is not None:
+                                d = min(router.cost_at(cum, e) * router.cell, 1e9) + 0.01 * d
+                            options.append((d, s, top, left))
+                    if here is None:
+                        break
+                _, s, top, left = min(options)
+            todo.remove(s)
+            pts = _section_points(sections[s], top, left, length, rng, jitter, inside)
+            if seg:
+                walk = _travel(seg[-1], pts[0], inside, router, travel_step)
+                if walk is None:
+                    segments.append(seg)
+                    seg = []
+                    cuts += 1
+                    if limit is not None and cuts >= limit:
+                        return None
+                else:
+                    travel += sum(dist(a, b) for a, b in zip([seg[-1]] + walk, walk + [pts[0]]))
+                    seg.extend(walk)
+            seg.extend(pts)
+            here = seg[-1]
+            if todo:
+                router.mark_filled(sections[s])
+        segments.append(seg)
+        return segments, cuts, travel
+
+    found = plan()
+    if search and found[1] and 1 < len(sections) <= PLAN_SECTIONS and rng is None:
+        # The nearest-first order left cuts (a walk would have shown across finished rows):
+        # try starting from other sections and corners (the farthest from where the
+        # needle comes in first: sewing the far side of a hole first usually lets every
+        # walk run over ground still to be filled, where the rows hide it), and keep the
+        # order with the fewest cuts.
+        firsts = [(s, top, left) for s in range(len(sections))
+                  for top in (True, False) for left in (True, False)]
+        if cur is not None:
+            firsts.sort(key=lambda f: -dist(cur, _entry(sections[f[0]], f[1], f[2])))
+        for first in firsts[:PLAN_TRIES]:
+            alt = plan(first, limit=found[1])
+            if alt is not None and (alt[1], alt[2]) < (found[1], found[2]):
+                found = alt
+            if not found[1]:
+                break
+    segments = found[0]
     # rotate back
     return [[(x * ca - y * sa, x * sa + y * ca) for x, y in sg] for sg in segments if len(sg) > 1]
 
 
-def _append(segments: list, new: list, cover, router: _Router, step: float = 2.5) -> None:
+class Cut(list):
+    """A piece of a top layer cut off from the piece before on purpose: the walk to it would
+    lie across that layer's own finished rows. Sequencing may join it only where stitching
+    of some other part, sewn later, hides the thread."""
+
+
+def _append(segments: list, new: list, cover, router: _Router, step: float = 2.5,
+            top: bool = False) -> None:
     """Add new segments after existing ones. Thread is carried across inside the shape (where
-    it will be covered) whenever there is a way; otherwise a jump is left."""
-    for sg in new:
+    it will be covered) whenever there is a way; otherwise a jump is left. With `top` (the
+    top layer, nothing sewn over it) only the first piece is joined on: the layer itself
+    split where a walk would lie across its own finished rows, so those stay cut."""
+    for k, sg in enumerate(new):
         if len(sg) < 2:
             continue
-        if segments:
+        if segments and not (top and k):
             walk = _travel(segments[-1][-1], sg[0], cover, router, step)
             if walk is not None:
                 segments[-1].extend(walk)
                 segments[-1].extend(sg)
                 continue
-        segments.append(list(sg))
+        segments.append(Cut(sg) if top and k else list(sg))
 
 
 def edge_run(poly: Polygon, inset: float, rules: dict) -> list:
@@ -809,9 +975,35 @@ def stitch_fill(obj: dict, rules: dict, angle_deg: float) -> list:
                                       rules["fill_stitch_mm"], start)
                 _append(segments, under, cover, router)
     start = segments[-1][-1] if segments else None
-    top = fill_segments(poly, angle_deg, rules["fill_spacing_mm"] * ROW_SHARE,
-                        rules["fill_stitch_mm"], start, extend=extend)
-    _append(segments, top, cover, router)
+    def rows_at(angle, search):
+        return fill_segments(poly, angle, rules["fill_spacing_mm"] * ROW_SHARE,
+                             rules["fill_stitch_mm"], start, extend=extend, search=search)
+
+    best_angle, top = angle_deg, rows_at(angle_deg, False)
+    if 1 < len(top) <= ALT_MAX_CUTS + 1 and obj.get("angle") is None:
+        # Cuts are left where the walk to the next section would show. Another row angle
+        # can make fewer, simpler sections (rows level with a band of knocked-out text run
+        # past the letters instead of breaking at every one): keep the angle with the
+        # fewest cuts. (Not for a web of thin bars with dozens of cuts: no angle helps it.)
+        # (neighbouring colors keep slightly different angles: level for one, a few
+        # degrees off for the next, or the seam between two fills frays: training session
+        # "Crisp fill edges")
+        # (tried first, so a tie keeps it; plain level rows only when they cut less)
+        tries = (0.0,) if obj.get("color", 0) % 2 == 0 else (180.0 - ALT_TILT_DEG, 0.0)
+        for alt in tries + (180.0 - angle_deg,):
+            if abs(alt - angle_deg) < 1.0:
+                continue
+            other = rows_at(alt, False)
+            if other and len(other) < len(top):
+                best_angle, top = alt, other
+            if len(top) == 1:
+                break
+    if len(top) > 1:
+        # still cuts: search other sewing orders at the best angle
+        searched = rows_at(best_angle, True)
+        if searched and len(searched) < len(top):
+            top = searched
+    _append(segments, top, cover, router, top=True)
     if obj.get("edge") and segments:
         _outline(segments, poly, rules)
     return segments
@@ -1011,6 +1203,8 @@ def run(classified: dict, rules: dict, debug_dir: Path | None = None) -> dict:
                                            and obj.get("seq") is None,
                              "shape": shape, "area_mm2": obj.get("area_mm2", 0.0),
                              "seq": obj.get("seq"), "punct": obj.get("punct", False),
+                             "text_h": obj.get("text_h"),
+                             "sew_last": bool(obj.get("sew_last")),
                              # small solid parts (windows, panels): the gaps between them
                              # are part of the design, so no thread may bridge them
                              "text_row": obj.get("text_row"),
